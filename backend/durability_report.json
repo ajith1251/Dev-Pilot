@@ -1,0 +1,31 @@
+{
+  "mode": "live",
+  "run_api": {
+    "run_id": "RUN-7B37044B",
+    "run_status": "rejected",
+    "handoffs": 4,
+    "decisions": 3,
+    "consensus_via_api": 3,
+    "consensus_recovered": 3,
+    "runs_in_table": 20
+  },
+  "goal_api": {
+    "goal_id": "GOAL-50A75C4D",
+    "goal_state": "waiting_for_human",
+    "goal_runs": [
+      "RUN-427906BA",
+      "RUN-A3B043B2"
+    ],
+    "goal_run_statuses": {
+      "RUN-427906BA": "rejected",
+      "RUN-A3B043B2": "failed"
+    },
+    "goal_latest_run_status": "rejected",
+    "goal_handoffs": 6,
+    "goal_decisions": 5,
+    "goal_consensus": 3,
+    "goal_recovered": "waiting_for_human"
+  },
+  "gates": [],
+  "passed": true
+}

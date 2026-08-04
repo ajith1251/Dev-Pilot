@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "my-api"
+version = "0.1.0"
+dependencies = ["fastapi>=0.115.0", "uvicorn>=0.30.0", "sqlalchemy>=2.0.0", "psycopg2>=2.9.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

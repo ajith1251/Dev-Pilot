@@ -1,0 +1,3 @@
+# Monorepo
+
+Full-stack application.

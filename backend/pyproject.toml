@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "devpilot-backend"
+version = "0.1.0"
+description = "DevPilot — Autonomous Multi-Agent Software Engineering Platform (Backend)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "integration: marks tests that require a live PostgreSQL server (TEST_DATABASE_URL)",
+    "live: marks tests that require a live LLM provider (DEVPILOT_LLM_PROVIDER + API key)",
+]
+norecursedirs = [
+    "fixtures/fixture_*",
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+    "env",
+    ".next",
+    "dist",
+    "build",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "N"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]

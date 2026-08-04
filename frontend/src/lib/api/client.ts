@@ -1,0 +1,455 @@
+/**
+ * DevPilot API Client
+ *
+ * Centralized typed client for communicating with the FastAPI backend.
+ * All API calls go through this module — no raw fetch() in components.
+ *
+ * Configuration:
+ *   NEXT_PUBLIC_API_BASE_URL — base URL for the FastAPI backend
+ *   Defaults to "" (same origin via Next.js rewrite proxy) for production.
+ */
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+
+// ── Types ─────────────────────────────────────────────────────
+
+export type RunStatus =
+  | "pending" | "running" | "approved" | "rejected"
+  | "needs_human_review" | "failed" | "cancelled";
+
+export type StageType =
+  | "initializing" | "acquiring_repository" | "analyzing_repository"
+  | "analyzing_task" | "planning" | "retrieving_context" | "coding"
+  | "validating_patch" | "applying_patch" | "testing" | "repairing"
+  | "reviewing" | "quality_gate" | "completed" | "failed";
+
+export type RunSourceType = "user_task" | "github_issue";
+
+export interface RunSource {
+  source_type: RunSourceType;
+  title: string;
+  description?: string;
+  repository_path?: string;
+  issue_number?: number;
+  issue_url?: string;
+}
+
+export interface StageResult {
+  stage: string;
+  status: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  error?: string | null;
+}
+
+export interface RunEvent {
+  event_id: string;
+  event_type: string;
+  stage?: string | null;
+  message: string;
+  timestamp: string;
+  sequence?: number;
+}
+
+export interface RunSummary {
+  run_id: string;
+  status: RunStatus;
+  source: string;
+  title: string;
+  current_stage: string;
+  created_at: string;
+  total_duration_ms?: number | null;
+}
+
+export interface RunDetail {
+  run_id: string;
+  status: RunStatus;
+  source: RunSource;
+  current_stage: string;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  stage_results: StageResult[];
+  failure?: {
+    stage: string;
+    code: string;
+    message: string;
+  } | null;
+  warnings: string[];
+  total_duration_ms?: number | null;
+  cancellation_requested: boolean;
+}
+
+export interface RunResult {
+  run_id: string;
+  status: RunStatus;
+  source: { source_type: string; title: string };
+  repository?: string | null;
+  stages: any[];
+  events: any[];
+  failure?: any;
+  warnings: string[];
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_seconds?: number | null;
+}
+
+export interface RunListStats {
+  total: number;
+  pending: number;
+  running: number;
+  approved: number;
+  rejected: number;
+  needs_human_review: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface Capabilities {
+  supported_sources: string[];
+  stages: string[];
+  cancellation_mode: string;
+  persistence_mode: string;
+  repair_enabled: boolean;
+  review_enabled: boolean;
+  github_write_enabled: boolean;
+  version: string;
+}
+
+export interface RecoveryResult {
+  store_type: string;
+  recovery_supported: boolean;
+  recoverable_found?: number;
+  marked_stale?: number;
+  recoverable_ids?: string[];
+  error?: string;
+}
+
+// ── Durability report (Phase 19) ───────────────────────────────
+
+/** Shape of the JSON emitted by scripts/durability_report.py. */
+export interface DurabilityRunApi {
+  run_id: string;
+  run_status: string;
+  handoffs: number;
+  decisions: number;
+  consensus_via_api: number;
+  consensus_recovered: number;
+  runs_in_table: number;
+}
+
+export interface DurabilityGoalApi {
+  goal_id: string;
+  goal_state: string;
+  goal_runs: string[];
+  goal_run_statuses: Record<string, string>;
+  goal_latest_run_status: string;
+  goal_handoffs: number;
+  goal_decisions: number;
+  goal_consensus: number;
+  goal_recovered: string;
+}
+
+export interface DurabilityReport {
+  mode: "live" | "skipped" | "error";
+  reason?: string;
+  error?: string;
+  run_api?: DurabilityRunApi;
+  goal_api?: DurabilityGoalApi;
+  gates?: string[];
+  passed?: boolean;
+}
+
+// ── Provider router (Phase 19B) ────────────────────────────────
+
+export type ProviderStatus =
+  | "healthy" | "degraded" | "unhealthy" | "unknown";
+
+export interface CircuitSnapshot {
+  state: "closed" | "open" | "half_open";
+  consecutive_failures: number;
+  failure_threshold: number;
+  cooldown_seconds: number;
+  half_open_max_calls: number;
+}
+
+export interface ProviderHealthSnapshot {
+  provider: string;
+  status: ProviderStatus;
+  total_requests: number;
+  successful_requests: number;
+  failed_requests: number;
+  success_rate: number | null;
+  consecutive_failures: number;
+  retries: number;
+  failovers: number;
+  avg_latency_ms: number | null;
+  last_latency_ms: number | null;
+  last_success_at: number | null;
+  last_failure_at: number | null;
+  uptime_seconds: number;
+}
+
+export interface ProviderEntryOverview {
+  name: string;
+  priority: number;
+  configured: boolean;
+  enabled: boolean;
+  default_model: string | null;
+  status: ProviderStatus;
+  active: boolean;
+  circuit: CircuitSnapshot;
+  health: ProviderHealthSnapshot;
+}
+
+export interface ProviderOverviewData {
+  routing_enabled: boolean;
+  active_provider: string | null;
+  priority: string[];
+  providers: ProviderEntryOverview[];
+}
+
+export interface ProviderHealthData {
+  routing_enabled: boolean;
+  active_provider: string | null;
+  providers: Array<{
+    name: string;
+    configured: boolean;
+    enabled: boolean;
+    status: ProviderStatus;
+    circuit_state: string;
+    default_model: string | null;
+    health: ProviderHealthSnapshot;
+  }>;
+}
+
+export interface FailoverEvent {
+  timestamp: number;
+  from: string;
+  to: string;
+  reason: string;
+}
+
+export interface ProviderTotals {
+  total_requests: number;
+  successful_requests: number;
+  failed_requests: number;
+  retries: number;
+  failovers: number;
+}
+
+export interface ProviderMetricsData {
+  totals: ProviderTotals;
+  per_provider: Record<string, ProviderHealthSnapshot & { circuit_state: string }>;
+  failover_events: FailoverEvent[];
+  uptime_seconds: Record<string, number>;
+  persisted?: Record<string, ProviderHealthSnapshot & { circuit_state: string }>;
+}
+
+export interface ProviderConfigData {
+  routing_enabled: boolean;
+  provider_priority: string[];
+  timeout_seconds: number;
+  retry: {
+    max_retries: number;
+    base_backoff_seconds: number;
+    max_backoff_seconds: number;
+  };
+  circuit_breaker: {
+    failure_threshold: number;
+    cooldown_seconds: number;
+    half_open_max_calls: number;
+  };
+  health: {
+    window: number;
+    degraded_success_rate: number;
+    unhealthy_success_rate: number;
+  };
+  providers: Record<string, { configured: boolean; key: string }>;
+}
+
+export interface ProviderTestData {
+  provider: string;
+  content: string;
+  finish_reason: string;
+}
+
+// ── Generic API helpers ───────────────────────────────────────
+
+class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const url = `${BASE_URL}${path}`;
+  const res = await fetch(url, {
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+    ...options,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(
+      `API ${res.status}: ${text.slice(0, 200)}`,
+      res.status
+    );
+  }
+
+  const data = await res.json();
+  return data as T;
+}
+
+// ── Run API ───────────────────────────────────────────────────
+
+export const runsApi = {
+  /** Create and execute a new run */
+  async create(params: {
+    title: string;
+    description?: string;
+    repository?: string;
+    source?: string;
+    issue_number?: number;
+    workspace_root?: string;
+  }): Promise<{ success: boolean; data: RunResult }> {
+    return request("/api/v1/runs", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+  },
+
+  /** List runs with optional filtering, sorting, and date range */
+  async list(params?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+    sort_by?: string;
+    created_after?: string;
+    created_before?: string;
+  }): Promise<{ success: boolean; data: RunSummary[]; count: number; total_count: number; stats?: RunListStats }> {
+    const query = new URLSearchParams();
+    if (params?.status) query.set("status", params.status);
+    if (params?.limit) query.set("limit", String(params.limit));
+    if (params?.offset) query.set("offset", String(params.offset));
+    if (params?.sort_by) query.set("sort_by", params.sort_by);
+    if (params?.created_after) query.set("created_after", params.created_after);
+    if (params?.created_before) query.set("created_before", params.created_before);
+    const qs = query.toString();
+    return request(`/api/v1/runs${qs ? `?${qs}` : ""}`);
+  },
+
+  /** Get run details */
+  async get(runId: string): Promise<{ success: boolean; data: RunDetail }> {
+    return request(`/api/v1/runs/${runId}`);
+  },
+
+  /** Cancel a running run */
+  async cancel(
+    runId: string
+  ): Promise<{ success: boolean; message: string }> {
+    return request(`/api/v1/runs/${runId}/cancel`, { method: "POST" });
+  },
+
+  /** Resume a previous interrupted run */
+  async resume(
+    runId: string,
+    workspace_root?: string
+  ): Promise<{ success: boolean; data: RunResult }> {
+    return request(`/api/v1/runs/${runId}/resume`, {
+      method: "POST",
+      body: JSON.stringify({ workspace_root }),
+    });
+  },
+
+  /** Get events for a run */
+  async events(
+    runId: string
+  ): Promise<{ success: boolean; data: RunEvent[]; count: number }> {
+    return request(`/api/v1/runs/${runId}/events`);
+  },
+};
+
+// ── Durability API ────────────────────────────────────────────
+
+export const durabilityApi = {
+  /** Fetch the latest durability_report.py JSON (run_api/goal_api summary) */
+  async report(): Promise<{
+    success: boolean;
+    data: DurabilityReport;
+  }> {
+    return request("/api/v1/durability/report");
+  },
+};
+
+// ── Provider Router API ────────────────────────────────────────
+
+export const providersApi = {
+  /** Registered providers, priority order and the active provider */
+  async overview(): Promise<{ success: boolean; data: ProviderOverviewData }> {
+    return request("/api/v1/providers");
+  },
+
+  /** Per-provider health: status, circuit state, latency, success rate */
+  async health(): Promise<{ success: boolean; data: ProviderHealthData }> {
+    return request("/api/v1/providers/health");
+  },
+
+  /** Runtime metrics: totals, per-provider counters, failover events */
+  async metrics(): Promise<{ success: boolean; data: ProviderMetricsData }> {
+    return request("/api/v1/providers/metrics");
+  },
+
+  /** Persisted metric history for a single provider (newest first) */
+  async history(
+    provider: string,
+    limit = 20
+  ): Promise<{ success: boolean; data: ProviderHealthSnapshot[] }> {
+    return request(
+      `/api/v1/providers/metrics/history?provider=${encodeURIComponent(provider)}&limit=${limit}`
+    );
+  },
+
+  /** Redacted routing configuration */
+  async config(): Promise<{ success: boolean; data: ProviderConfigData }> {
+    return request("/api/v1/providers/config");
+  },
+
+  /** Route one benign test call through the router */
+  async test(message?: string): Promise<{ success: boolean; data: ProviderTestData }> {
+    return request("/api/v1/providers/test", {
+      method: "POST",
+      body: JSON.stringify(message ? { message } : {}),
+    });
+  },
+};
+
+// ── Orchestration API ─────────────────────────────────────────
+
+export const orchestrationApi = {
+  /** Get orchestration capabilities */
+  async capabilities(): Promise<{
+    success: boolean;
+    data: Capabilities;
+  }> {
+    return request("/api/v1/orchestration/capabilities");
+  },
+
+  /** Check for recoverable runs after restart */
+  async recovery(): Promise<{
+    success: boolean;
+    data: RecoveryResult;
+  }> {
+    return request("/api/v1/orchestration/recovery", { method: "POST" });
+  },
+};

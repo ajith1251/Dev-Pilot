@@ -1,0 +1,1 @@
+def get_user(id: int): pass

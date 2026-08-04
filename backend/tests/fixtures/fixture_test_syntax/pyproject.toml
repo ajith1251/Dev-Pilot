@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "fixture-test-syntax"
+version = "0.1.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

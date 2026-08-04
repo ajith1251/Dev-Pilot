@@ -1,0 +1,219 @@
+# DevPilot CI
+#
+# Validates BOTH persistence paths on every push/PR (see README → CI Matrix):
+#
+#   in-memory    — no PostgreSQL: PG-dependent tests must SKIP, not fail.
+#   postgres     — dockerized postgres:18.4 service: alembic upgrade head
+#                  (migration chain 001→012) + the full suite against live PG.
+#   live-llm-e2e — Demonstration A in CI: BOTH live API paths via
+#                  `tests/test_api_durability.py -m live` (pytest) — one real
+#                  `execute_run` (POST /api/v1/runs) AND one real autonomous
+#                  goal loop (POST /api/v1/autonomy/run) against a production
+#                  LLM provider. Runs only when a provider secret is
+#                  configured or via manual dispatch, so CI stays green
+#                  with no API keys. The tests fail unless the run reaches a
+#                  terminal verdict (approved / rejected /
+#                  needs_human_review) AND the goal reaches a terminal state
+#                  (completed / stopped / waiting_for_human) with persisted
+#                  runs that reached verdicts — failing the job on broken
+#                  pipelines — mirroring the demo_phase17 live-
+#                  Demonstration-A pattern (and the equivalent
+#                  scripts/verify_api_durability.py --live gate). The job also
+#                  runs scripts/durability_report.py --out durability_report.json
+#                  (same two live paths) and uploads the JSON as the
+#                  `durability-report` artifact — the document served by
+#                  GET /api/v1/durability/report in the web dashboard — with
+#                  an explicit mode=live && passed=true assertion so an
+#                  expired 24h-TTL key can never produce a silent green
+#                  artifact.
+#
+# 24h-TTL key note: free-tier provider keys (e.g. Gemini) are intentionally
+# short-lived (~24h TTL). Refresh the repo secrets before each manual run:
+#   DEVPILOT_LLM_PROVIDER (openai | anthropic | gemini)
+#   OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY (matching the provider)
+#
+# Secrets safety: `backend/.env` must NEVER be committed — a checked-in .env
+# would leak provider keys AND make the in-memory job silently connect to a
+# real database instead of exercising the fallback path.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live_llm_provider:
+        description: >-
+          Provider for the live-LLM E2E job (openai | anthropic | gemini).
+          Falls back to the DEVPILOT_LLM_PROVIDER secret.
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Path 1 — in-memory fallback (no PostgreSQL) ───────────────────
+  in-memory:
+    name: In-memory fallback (no PostgreSQL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run full suite (PG-dependent tests must skip, not fail)
+        env:
+          DATABASE_URL: ''
+          TEST_DATABASE_URL: ''
+        run: python -m pytest -q --tb=short -p no:cacheprovider
+
+  # ── Path 2 — live PostgreSQL (dockerized 18.4 service) ────────────
+  postgres:
+    name: PostgreSQL 18.4 (migrations + full suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: devpilot
+          POSTGRES_PASSWORD: devpilot
+          POSTGRES_DB: devpilot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devpilot -d devpilot_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://devpilot:devpilot@localhost:5432/devpilot_test
+      TEST_DATABASE_URL: postgresql+asyncpg://devpilot:devpilot@localhost:5432/devpilot_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run migrations (chain 001→012)
+        run: alembic upgrade head
+      - name: Run full suite (live PostgreSQL)
+        # Includes tests/test_api_durability.py::TestApiDurabilityDeterministic
+        # (deterministic raw-HTTP-path coverage: POST /api/v1/autonomy/run via
+        # ASGI with stage drivers — no provider key needed; asserts runs table
+        # rows, handoff metrics, restart recovery). The live class
+        # (TestLiveApiDurability) skips here (no provider) and runs for real
+        # in live-llm-e2e.
+        run: python -m pytest -q --tb=short -p no:cacheprovider
+
+  # ── Demonstration A — real run + real goal loop vs a live provider ─
+  live-llm-e2e:
+    name: Live-LLM E2E (run + goal via HTTP API)
+    runs-on: ubuntu-latest
+    # Gate: runs when an operator configured a provider secret (any event),
+    # or on manual dispatch WITH an explicit provider input. A keyless
+    # dispatch is skipped (not a silent green no-op). `secrets.X != ''` is
+    # valid at job level, so CI stays green with no API keys configured.
+    if: secrets.DEVPILOT_LLM_PROVIDER != '' || (github.event_name == 'workflow_dispatch' && inputs.live_llm_provider != '')
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: devpilot
+          POSTGRES_PASSWORD: devpilot
+          POSTGRES_DB: devpilot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devpilot -d devpilot_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://devpilot:devpilot@localhost:5432/devpilot_test
+      TEST_DATABASE_URL: postgresql+asyncpg://devpilot:devpilot@localhost:5432/devpilot_test
+      DEVPILOT_LLM_PROVIDER: ${{ inputs.live_llm_provider || secrets.DEVPILOT_LLM_PROVIDER }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run migrations (chain 001→012)
+        run: alembic upgrade head
+      - name: Live run + goal via HTTP API (fails on non-terminal outcome)
+        # tests/test_api_durability.py::TestLiveApiDurability (pytest -m live)
+        # drives BOTH live API paths — one real execute_run (POST /api/v1/runs)
+        # AND one real autonomous goal loop (POST /api/v1/autonomy/run) — and
+        # fails unless the run reaches a terminal verdict AND the goal a
+        # terminal state with persisted runs that reached verdicts. Same gates
+        # as scripts/verify_api_durability.py --live (which remains available
+        # for manual runs with --json output); pytest gives repeatable,
+        # per-check CI coverage.
+        #
+        # Known flake: free-tier providers (e.g. Gemini) can return the
+        # documented ~20-25% "no patch" variance twice in a row — the coding
+        # retry (CODING_RETRY, PROJECT_STATE item 12) fires but both attempts
+        # can be empty, failing the run and this job. That is the gate doing
+        # its job (a broken pipeline must fail); re-run the job after a quota/
+        # reset window when it occurs on otherwise-healthy code.
+        run: python -m pytest tests/test_api_durability.py -q -m live --tb=short -p no:cacheprovider
+      - name: Generate durability report JSON (artifact for /api/v1/durability/report)
+        # Dispatch-only: the pytest step above already gates every live run on
+        # push/PR; the artifact is the ops deliverable for manual runs, so we
+        # avoid paying the two live HTTP paths twice on routine pushes.
+        if: github.event_name == 'workflow_dispatch'
+        # Runs the SAME two live API paths as the pytest step above (one real
+        # execute_run + one real autonomous goal loop) through
+        # scripts/durability_report.py and emits durability_report.json — the
+        # exact document GET /api/v1/durability/report serves. The script
+        # exits 1 unless the run reached a terminal verdict AND the goal a
+        # terminal state with its newest run terminal; we additionally assert
+        # mode == "live" and passed is true so a skipped/error report (e.g.
+        # an expired 24h-TTL key that check_live_mode now rejects) ALSO fails
+        # the job — never a silent green artifact.
+        run: |
+          python scripts/durability_report.py --out durability_report.json
+          python - <<'PY'
+          import json
+          report = json.load(open("durability_report.json", encoding="utf-8"))
+          if report.get("mode") != "live":
+              raise SystemExit(
+                  f"durability report mode={report.get('mode')} "
+                  f"{report.get('reason') or report.get('error') or ''}")
+          if not report.get("passed"):
+              raise SystemExit(
+                  f"durability gates failed: {report.get('gates')}")
+          print("durability report PASSED — artifact ready")
+          PY
+      - name: Upload durability report artifact
+        if: github.event_name == 'workflow_dispatch'
+        # Publishes the JSON so operators can download it and point
+        # DURABILITY_REPORT_PATH at it (or the job's own checkout already
+        # contains backend/durability_report.json for the endpoint's default).
+        uses: actions/upload-artifact@v4
+        with:
+          name: durability-report
+          path: backend/durability_report.json
+          if-no-files-found: error

@@ -1,0 +1,34 @@
+# DevPilot — PostgreSQL test database
+#
+# Matches the locally-verified setup (PostgreSQL 18.4) so the full suite can
+# validate migrations and persistence against a clean, disposable database:
+#
+#     docker compose up -d
+#     cd backend && export TEST_DATABASE_URL="postgresql+asyncpg://devpilot:devpilot@localhost:5432/devpilot_test"
+#     python -m pytest
+#
+# Credentials are overridable via environment (POSTGRES_USER / POSTGRES_PASSWORD)
+# so you are never locked into the defaults and CI can supply its own.
+
+services:
+  postgres:
+    image: postgres:18.4
+    container_name: devpilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpilot}
+      POSTGRES_DB: ${POSTGRES_DB:-devpilot_test}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - devpilot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devpilot} -d ${POSTGRES_DB:-devpilot_test}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  devpilot_pgdata:
