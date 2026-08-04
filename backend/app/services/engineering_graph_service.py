@@ -25,6 +25,7 @@ decisions, and provenance — never chain-of-thought.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -95,6 +96,33 @@ _NODE_ID_PREFIX = {
 
 
 _NODE_ID_MAX = 40  # must fit ekg_nodes.node_id / ekg_edges.source_id (String(40))
+
+# Background WebSocket broadcast tasks are referenced here so they are not
+# garbage-collected before completion (see _fire_graph_broadcast).
+_BG_TASKS: Set[asyncio.Task] = set()
+
+
+def _fire_graph_broadcast(coro: Callable[[], Any]) -> None:
+    """Fire-and-forget an async graph broadcast without breaking callers.
+
+    Runs only when an event loop is active (FastAPI request / test loop).
+    Never raises: broadcasting is best-effort observability.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_run_graph_broadcast(coro))
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+async def _run_graph_broadcast(coro: Callable[[], Any]) -> None:
+    try:
+        await coro()
+    except Exception:  # pragma: no cover - best-effort path
+        logger.debug("Graph broadcast failed (ignored)", exc_info=True)
+
 
 
 def _stable_id(
@@ -530,7 +558,24 @@ class EngineeringKnowledgeGraphService:
             if node:
                 self._record_history(node)
                 node.status = EKNodeStatus.SUPERSEDED
+        # Best-effort live graph update for dashboard subscribers (§19C).
+        _fire_graph_broadcast(
+            lambda: self._broadcast_version_change(version)
+        )
         return version
+
+    async def _broadcast_version_change(self, version: GraphVersion) -> None:
+        """Push a graph version change to live dashboard subscribers."""
+        from app.services.ws_manager import ws_manager
+
+        await ws_manager.broadcast_graph_update({
+            "version": version.version,
+            "run_id": version.run_id,
+            "summary": version.summary[:200],
+            "updated_nodes": version.updated_nodes,
+            "updated_edges": version.updated_edges,
+            "superseded_node_ids": version.superseded_node_ids,
+        })
 
     def current_version(self) -> GraphVersion:
         return GraphVersion(
@@ -541,6 +586,90 @@ class EngineeringKnowledgeGraphService:
 
     def version_history(self, limit: int = 20) -> List[GraphVersion]:
         return self._versions[-limit:]
+
+    # ── Version diff (§19C timeline) ────────────────────────────
+
+    def diff_versions(
+        self,
+        from_version: int,
+        to_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Summarize the graph change-set between two versions.
+
+        Incremental version records store the node/edge ids that each
+        version touched (added or updated) plus superseded node ids, so a
+        bounded change-set is computed without full snapshots:
+
+          added_nodes    — union of updated_nodes across versions (from, to]
+          removed_nodes  — union of superseded_node_ids across versions
+          changed_edges  — union of updated_edges across versions
+          per_version    — the same breakdown per version increment
+
+        Node details (name/type/status) are resolved from the current node
+        map so removed nodes still render with their last-known identity.
+        """
+        if from_version < 0 or to_version is not None and to_version < from_version:
+            raise ValueError(
+                f"Invalid version range: from={from_version} to={to_version}"
+            )
+        target = to_version if to_version is not None else self._version
+        versions = [v for v in self._versions if v.version > from_version and v.version <= target]
+
+        added_ids: List[str] = []
+        removed_ids: List[str] = []
+        changed_edge_ids: List[str] = []
+        for v in versions:
+            for nid in v.updated_nodes:
+                if nid not in added_ids:
+                    added_ids.append(nid)
+            for nid in v.superseded_node_ids:
+                if nid not in removed_ids:
+                    removed_ids.append(nid)
+            for eid in v.updated_edges:
+                if eid not in changed_edge_ids:
+                    changed_edge_ids.append(eid)
+
+        def _describe_node(nid: str) -> Dict[str, Any]:
+            node = self._nodes.get(nid)
+            return {
+                "node_id": nid,
+                "name": node.name if node else nid,
+                "node_type": node.node_type.value if node else "unknown",
+                "status": node.status.value if node else "removed",
+            }
+
+        return {
+            "from_version": from_version,
+            "to_version": target,
+            "added_nodes": [_describe_node(n) for n in added_ids],
+            "removed_nodes": [_describe_node(n) for n in removed_ids],
+            "changed_edges": [
+                {
+                    "edge_id": eid,
+                    "source_id": eid.split("->")[0] if "->" in eid else "",
+                    "target_id": eid.split("->")[1] if "->" in eid else "",
+                }
+                for eid in changed_edge_ids
+            ],
+            "counts": {
+                "added": len(added_ids),
+                "removed": len(removed_ids),
+                "changed_edges": len(changed_edge_ids),
+            },
+            "per_version": [
+                {
+                    "version": v.version,
+                    "run_id": v.run_id,
+                    "summary": v.summary,
+                    "added": len(v.updated_nodes),
+                    "removed": len(v.superseded_node_ids),
+                    "changed_edges": len(v.updated_edges),
+                    "timestamp": v.timestamp,
+                }
+                for v in versions
+            ],
+        }
+
 
     # ── Stats ───────────────────────────────────────────────────
 

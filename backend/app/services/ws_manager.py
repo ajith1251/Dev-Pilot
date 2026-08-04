@@ -278,6 +278,46 @@ class WebSocketManager:
             count += len(conns)
         return count
 
+    # ── Graph live feed (§19C) ──────────────────────────────────
+
+    async def broadcast_graph_update(self, data: Dict[str, Any]) -> int:
+        """Broadcast an engineering-graph change to live graph subscribers.
+
+        Graph watchers subscribe with key "__graph__". The payload carries
+        the incremental change-set (version bump, updated node/edge ids) so
+        clients can refresh without a full reload.
+
+        Returns:
+            Number of clients the message was sent to.
+        """
+        async with self._lock:
+            connections = self._connections.get("__graph__", set()).copy()
+
+        if not connections:
+            return 0
+
+        payload = json.dumps(
+            {
+                "type": "graph_update",
+                "event_type": "version_incremented",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data": data,
+            },
+            default=str,
+        )
+
+        sent = 0
+        for ws in connections:
+            try:
+                await ws.send_text(payload)
+                sent += 1
+            except Exception:
+                async with self._lock:
+                    self._connections.get("__graph__", set()).discard(ws)
+
+        return sent
+
+
     async def close_all(self) -> None:
         """Close all WebSocket connections (used during shutdown)."""
         all_connections: List[WebSocket] = []

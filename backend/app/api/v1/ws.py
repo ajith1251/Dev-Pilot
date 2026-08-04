@@ -91,6 +91,49 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@router.websocket("/graph")
+async def graph_websocket(websocket: WebSocket) -> None:
+    """Subscribe to live engineering-graph updates.
+
+    On connect, sends the current graph version + stats snapshot.
+    Then receives broadcast updates whenever the graph version increments
+    (new nodes, relationship changes, superseded nodes) without a page
+    refresh.
+    """
+    await ws_manager.connect(websocket, "__graph__")
+
+    try:
+        from app.api.v1.engineering_graph import _get_service
+
+        svc = _get_service()
+        stats = svc.stats().summary()
+        await websocket.send_json({
+            "type": "graph_update",
+            "event_type": "snapshot",
+            "timestamp": _now(),
+            "message": "Graph feed connected",
+            "data": {"version": stats["version"], "stats": stats},
+        })
+    except Exception as exc:
+        logger.warning("Failed to send initial graph snapshot: %s", exc)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "pong":
+                    pass  # Connection keepalive
+            except (json.JSONDecodeError, KeyError):
+                pass
+    except WebSocketDisconnect:
+        logger.debug("WebSocket disconnected from graph feed")
+    except Exception as exc:
+        logger.warning("WebSocket error on graph feed: %s", exc)
+    finally:
+        await ws_manager.disconnect(websocket, "__graph__")
+
+
 @router.websocket("/runs/{run_id}")
 async def run_websocket(websocket: WebSocket, run_id: str) -> None:
     """Subscribe to real-time updates for a specific run.

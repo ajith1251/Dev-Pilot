@@ -254,6 +254,26 @@ async def graph_version() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get("/diff", response_model=Response)
+async def graph_diff(
+    from_version: int,
+    to_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Change-set between two graph versions (timeline comparison).
+
+    Bounded, evidence-only: added/removed nodes + changed edges + a
+    per-version breakdown. Used by the frontend graph timeline view.
+    """
+    try:
+        service = _get_service()
+        diff = service.diff_versions(from_version, to_version)
+        return {"success": True, "data": diff}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── Phase 19A: Organization Knowledge Graph ─────────────────────
 
 _org_service = None

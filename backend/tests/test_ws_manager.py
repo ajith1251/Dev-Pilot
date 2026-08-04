@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -347,4 +348,52 @@ class TestGlobalSingleton:
         from app.services.ws_manager import ws_manager
 
         assert hasattr(ws_manager, "close_all")
+
+
+# ═════════════════════════════════════════════════════════════════
+# 8 — GRAPH LIVE FEED (§19C)
+# ═════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestBroadcastGraphUpdate:
+    """WebSocketManager.broadcast_graph_update fans out to __graph__ watchers."""
+
+    async def test_fans_out_to_graph_watchers_only(self):
+        mgr = WebSocketManager()
+        graph_ws = _make_mock_websocket()
+        run_ws = _make_mock_websocket()
+
+        await mgr.connect(graph_ws, "__graph__")
+        await mgr.connect(run_ws, "RUN-UNRELATED")
+
+        sent = await mgr.broadcast_graph_update(
+            {"version": 12, "run_id": "RUN-G", "updated_nodes": ["n1"]}
+        )
+        assert sent == 1
+
+        payload = json.loads(graph_ws.send_text.call_args.args[0])
+        assert payload["type"] == "graph_update"
+        assert payload["event_type"] == "version_incremented"
+        assert payload["data"]["version"] == 12
+        assert payload["data"]["run_id"] == "RUN-G"
+        assert payload["data"]["updated_nodes"] == ["n1"]
+        assert "timestamp" in payload
+
+        run_ws.send_text.assert_not_called()
+
+    async def test_no_watchers_returns_zero(self):
+        mgr = WebSocketManager()
+        sent = await mgr.broadcast_graph_update({"version": 1})
+        assert sent == 0
+
+    async def test_send_failure_is_tolerated(self):
+        mgr = WebSocketManager()
+        failing = _make_mock_websocket()
+        failing.send_text = AsyncMock(side_effect=RuntimeError("socket closed"))
+        await mgr.connect(failing, "__graph__")
+
+        sent = await mgr.broadcast_graph_update({"version": 2})
+        assert sent == 0
+        assert mgr.active_connections == 0
         assert callable(ws_manager.close_all)

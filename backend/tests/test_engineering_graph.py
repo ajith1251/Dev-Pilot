@@ -258,6 +258,54 @@ class TestVersioning:
         assert stats.relationship_types.get("approved_by") == 1
 
 
+# ── Version diff (§19C timeline) ───────────────────────────────
+
+
+class TestVersionDiff:
+    def test_diff_versions_returns_change_set(self):
+        g = make_service()
+        g.increment_version(run_id="RUN-D0", summary="seed", updated_nodes=["n0"])
+        node_a = add_requirement(g, "RUN-D1", "req added at v2")
+        g.increment_version(
+            run_id="RUN-D1", summary="added req", updated_nodes=[node_a.node_id],
+        )
+        v2 = g.current_version().version
+        diff = g.diff_versions(v2 - 1, v2)
+        assert diff["from_version"] == v2 - 1
+        assert diff["to_version"] == v2
+        assert any(n["node_id"] == node_a.node_id for n in diff["added_nodes"])
+        assert diff["counts"]["added"] >= 1
+        assert diff["per_version"][-1]["version"] == v2
+
+    def test_diff_versions_removed_nodes(self):
+        g = make_service()
+        node = add_requirement(g, "RUN-D", "will be superseded")
+        g.increment_version(
+            run_id="RUN-D",
+            summary="supersede",
+            updated_nodes=["other"],
+            superseded_node_ids=[node.node_id],
+        )
+        diff = g.diff_versions(0)
+        assert any(n["node_id"] == node.node_id for n in diff["removed_nodes"])
+        removed = next(n for n in diff["removed_nodes"] if n["node_id"] == node.node_id)
+        assert removed["name"] == "will be superseded"
+
+    def test_diff_versions_to_defaults_current(self):
+        g = make_service()
+        g.increment_version(run_id="RUN-X", summary="x", updated_nodes=["n"])
+        diff = g.diff_versions(0)
+        assert diff["to_version"] == g.current_version().version
+        assert diff["counts"]["added"] >= 1
+
+    def test_diff_versions_invalid_range(self):
+        g = make_service()
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError):
+            g.diff_versions(5, 2)
+
+
 # ── History / explain (provenance) ─────────────────────────────
 
 
@@ -540,6 +588,105 @@ class TestGraphAPI:
             assert "chain" not in text.lower()
             assert "cot" not in text
             assert "hidden_prompt" not in text.lower()
+
+    def test_diff_endpoint(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        svc = self._seed_api()
+        svc.increment_version(run_id="RUN-DIFF", summary="timeline step",
+                              updated_nodes=["n1", "n2"])
+        current = svc.current_version().version
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/v1/graph/diff",
+                params={"from_version": current - 1, "to_version": current},
+            )
+            assert resp.status_code == 200
+            data = resp.json()["data"]
+            assert data["from_version"] == current - 1
+            assert data["to_version"] == current
+            assert data["counts"]["added"] >= 1
+            assert data["per_version"][-1]["version"] == current
+
+    def test_diff_endpoint_invalid_range(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        self._seed_api()
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/v1/graph/diff",
+                params={"from_version": 9, "to_version": 3},
+            )
+            assert resp.status_code == 400
+
+    def test_diff_endpoint_defaults_to_current(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        svc = self._seed_api()
+        svc.increment_version(run_id="RUN-DIFF2", summary="s", updated_nodes=["n3"])
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/graph/diff", params={"from_version": 0})
+            assert resp.status_code == 200
+            assert resp.json()["data"]["to_version"] == svc.current_version().version
+
+
+# ── Graph live WebSocket (§19C) ────────────────────────────────
+
+
+class TestGraphWebSocket:
+    def test_graph_feed_sends_snapshot(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/api/v1/ws/graph") as ws:
+                msg = ws.receive_json()
+                assert msg["type"] == "graph_update"
+                assert msg["event_type"] == "snapshot"
+                assert "data" in msg
+                assert msg["data"]["version"] >= 0
+
+    def test_graph_feed_receives_live_version_bump(self):
+        """A version increment while subscribed is pushed to the client."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        from app.services.engineering_graph_service import (
+            EngineeringKnowledgeGraphService,
+        )
+
+        svc = EngineeringKnowledgeGraphService()
+        from app.api.v1 import engineering_graph as api_module
+
+        api_module._service = svc
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/api/v1/ws/graph") as ws:
+                first = ws.receive_json()
+                assert first["event_type"] == "snapshot"
+                # Bump the version inside the server's event loop so the
+                # best-effort broadcast fires while the client is subscribed.
+                client.portal.call(
+                    lambda: svc.increment_version(
+                        run_id="RUN-WS",
+                        summary="live update",
+                        updated_nodes=["n9"],
+                    )
+                )
+                second = ws.receive_json()
+                assert second["type"] == "graph_update"
+                assert second["event_type"] == "version_incremented"
+                assert second["data"]["run_id"] == "RUN-WS"
+                assert "n9" in second["data"]["updated_nodes"]
+
+        api_module._service = None
 
 
 # ── CLI ────────────────────────────────────────────────────────

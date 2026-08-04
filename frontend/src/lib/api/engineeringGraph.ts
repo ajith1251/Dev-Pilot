@@ -112,6 +112,59 @@ export interface GraphStats {
   last_updated: string;
 }
 
+// ── Version diff (§19C timeline) ───────────────────────────────
+
+export interface GraphDiffNode {
+  node_id: string;
+  name: string;
+  node_type: string;
+  status: string;
+}
+
+export interface GraphDiffEdge {
+  edge_id: string;
+  source_id: string;
+  target_id: string;
+}
+
+export interface GraphDiffPerVersion {
+  version: number;
+  run_id: string;
+  summary: string;
+  added: number;
+  removed: number;
+  changed_edges: number;
+  timestamp: string;
+}
+
+export interface GraphDiff {
+  from_version: number;
+  to_version: number;
+  added_nodes: GraphDiffNode[];
+  removed_nodes: GraphDiffNode[];
+  changed_edges: GraphDiffEdge[];
+  counts: { added: number; removed: number; changed_edges: number };
+  per_version: GraphDiffPerVersion[];
+}
+
+// ── Live graph updates (§19C) ──────────────────────────────────
+
+export interface GraphUpdateEvent {
+  type: "graph_update";
+  event_type: "snapshot" | "version_incremented";
+  timestamp: string;
+  message?: string;
+  data: {
+    version: number;
+    run_id?: string;
+    summary?: string;
+    updated_nodes?: string[];
+    updated_edges?: string[];
+    superseded_node_ids?: string[];
+    stats?: GraphStats;
+  };
+}
+
 // ── EKG API ───────────────────────────────────────────────────
 
 export const graphApi = {
@@ -174,6 +227,16 @@ export const graphApi = {
       success: boolean;
       data: { version: GraphStats; history: GraphVersionRecord[] };
     }>(`/api/v1/graph/version`);
+    return res.data;
+  },
+
+  /** Change-set between two graph versions (timeline comparison). */
+  async diff(fromVersion: number, toVersion?: number): Promise<GraphDiff> {
+    const params = new URLSearchParams({ from_version: String(fromVersion) });
+    if (toVersion !== undefined) params.set("to_version", String(toVersion));
+    const res = await request<{ success: boolean; data: GraphDiff }>(
+      `/api/v1/graph/diff?${params.toString()}`
+    );
     return res.data;
   },
 };

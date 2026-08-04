@@ -1,8 +1,8 @@
 # Engineering Knowledge Graph (Phase 18)
 
-> **Status**: Complete ✅
-> **Last updated**: August 2, 2026
-> **Test baseline**: 1392 passed / 18 skipped / 0 failed (live PostgreSQL 18.4)
+> **Status**: Complete, incl. Phase 19C part 1 (cross-repo namespaces) + part 2 (interactive visualization).
+> **Last updated**: August 4, 2026
+> **Test baseline**: 1580 passed / 18 skipped / 1 failed (live PostgreSQL 18.4; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) + 29 frontend vitest tests green
 
 ---
 
@@ -332,6 +332,8 @@ Bounded, evidence-only endpoints under `/api/v1/graph`:
 | `GET /graph/neighborhood/{id}?depth=&max_nodes=` | bounded traversal |
 | `GET /graph/explain/{id}` | provenance + related evidence |
 | `GET /graph/version` | current version + stats + history |
+| `GET /graph/diff?from_version=&to_version=` | timeline change-set (added/removed nodes, changed edges, per-version breakdown) — Phase 19C |
+| `WS /ws/graph` | live graph feed: `graph_update` `snapshot` on connect, `version_incremented` on every version bump — Phase 19C |
 
 Responses expose only verified engineering evidence, decisions, and provenance
 — never chain-of-thought or hidden prompts.
@@ -361,15 +363,21 @@ All commands support `--json` output.
   provenance, related evidence, temporal history, payload
 - graph version stats cards + version history table
 - node distribution chips
-- **force-directed neighborhood view**: select a node (in the result list,
-  inspector, or the graph itself) to expand its 1–3 hop neighborhood on a
-  shared SVG simulation canvas — pan/zoom/drag, color-by-type, size-by-degree,
-  hover tooltip, depth selector, reload/reset-view/clear controls. Backed by
-  `GET /api/v1/graph/neighborhood/{id}?depth=&max_nodes=`.
+- **interactive force-directed view (Phase 19C part 2)**: the neighborhood
+  panel now runs a production graph engine (`@xyflow/react` React Flow v12 +
+  seeded d3-force layout) with node/relationship/repository filtering, text
+  search, per-node collapse, jump-to-node, a live WebSocket badge, a graph
+  timeline with version-diff (added/removed/changed) breakdown, and an
+  evidence-only provenance panel. See `docs/GRAPH_VISUALIZATION.md`.
 
-The force-directed canvas lives in
+The 19C interactive canvas lives in
+`frontend/src/components/graph/InteractiveGraph.tsx` (custom React Flow
+`GraphNodeView`, cached deterministic layout via
+`frontend/src/lib/graph/graphModel.ts`, live updates via
+`frontend/src/lib/graph/useGraphSocket.ts`); the legacy shared SVG canvas
 `frontend/src/components/graph/ForceDirectedGraph.tsx` (exported
-`ForceGraph`, `hexFor`, `nodeTypeLabel`, `truncate`, `VizNode`, `VizEdge`);
+`ForceGraph`, `hexFor`, `nodeTypeLabel`, `truncate`, `VizNode`, `VizEdge`)
+is still shared with the organization-graph page.
 it is shared with the organization-graph page.
 
 Uses only the real `/api/v1/graph/*` endpoints — no mock data.
@@ -404,6 +412,10 @@ Uses only the real `/api/v1/graph/*` endpoints — no mock data.
   payload persistence)
 - integrations (ContextEngine, idempotent ingestion)
 - regression (evidence-only, bounded results)
+- Phase 19C additions: `diff_versions` change-sets (per-version breakdown,
+  bounded), `GET /graph/diff` endpoint (+ 404/400), graph WebSocket
+  (`/ws/graph` snapshot + live `version_incremented`), fire-and-forget
+  broadcast on `increment_version`
 
 ---
 
@@ -434,9 +446,59 @@ python scripts/demo_phase18.py            # with TEST_DATABASE_URL set → live-
 > shared PG where historical TEST_SUITE rows from earlier runs bleed into the
 > selection; it passes on a fresh graph. Demo I is idempotent.
 
+`scripts/demo_phase19c.py` (Phase 19C part 2, deterministic, no paid LLM):
+
+- **A** Interactive exploration — bounded neighborhood expansion at depth 1/2/3
+  + the node/relationship facets consumed by the frontend legend
+- **B** Cross-repository navigation — org-scope merge, local-scope isolation,
+  bridge-only traversal across `link_repositories` edges
+- **C** Relationship highlighting — the frontend palette covers 100% of the
+  backend enums (28 node types, 27 relationships) + a relationship histogram
+  + filtered-edge demo over a real neighborhood
+- **D** Graph version comparison — `diff_versions` change-set feeding the graph
+  timeline (added/removed nodes, changed edges, per-version breakdown)
+- **E** Live WebSocket graph updates — `WS /api/v1/ws/graph` snapshot + live
+  `version_incremented` broadcast without a page refresh
+- **F** Search/filter performance — 3000-node synthetic graph with bounded
+  query + neighborhood latency and result caps
+
+```bash
+python scripts/demo_phase19c.py            # in-memory
+python scripts/demo_phase19c.py --pg       # PostgreSQL persistence
+python scripts/demo_phase19c.py --json     # JSON summary
+```
+
 ---
 
-## 22. Limitations
+## 22. Phase 19C part 2 — Interactive Visualization (§19C)
+
+Full architecture, engine selection, layout determinism, filtering, search,
+provenance, WebSocket wiring, and performance budget live in
+`docs/GRAPH_VISUALIZATION.md`. Highlights:
+
+- Production engine: `@xyflow/react` (React Flow v12) owns pan/zoom/drag/
+  fitView/minimap/controls/fullscreen; `d3-force` is used *only* as a layout
+  algorithm — seeded, deterministic, and cacheable per graph signature.
+- Deterministic layout: `computeForceLayout` patches `Math.random` with a
+  seeded LCG (default seed 42), supports `initialPositions` for incremental
+  expansion, and caches positions per graph signature (`id::` joined), so the
+  same query renders identically every time.
+- 100% registry contract: `NODE_CATEGORY`/`NODE_HEX` cover all 28
+  `EKNodeType` values and `RELATIONSHIP_HEX` all 27 `EKRelationshipType`
+  values, frozen by `registryContract.test.ts` and demo C.
+- Live updates: `useGraphSocket` (module-level singleton + `useSyncExternalStore`)
+  receives `snapshot` on connect and `version_incremented` broadcasts with
+  exponential backoff reconnects.
+- Performance: 500-node layout + 2000-node filter smoke tests in
+  `graphModel.test.ts`; the page caps visible nodes (MAX_VIS_NODES=250) with
+  virtualized React Flow rendering (`onlyRenderVisibleElements`).
+- Security: the provenance panel is evidence-only — a regression test filters
+  prohibited provenance keys (chain-of-thought / hidden prompts / provider
+  config) from the API surface.
+
+---
+
+## 23. Limitations
 
 - Node payloads are bounded JSONB snapshots, not full artifact bodies (artifacts
   remain in their source stores)

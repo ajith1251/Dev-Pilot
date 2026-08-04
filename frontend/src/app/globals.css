@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Phase 19C — production graph engine (@xyflow/react).
+   Engine styles are imported from node_modules in layout.tsx; overrides live below. */
+
 :root {
   --foreground-rgb: 15, 23, 42;
   --background-start-rgb: 248, 250, 252;
@@ -24,4 +27,101 @@ body {
       rgb(var(--background-end-rgb))
     )
     rgb(var(--background-start-rgb));
+}
+
+/* ── React Flow theming ─────────────────────────────────────── */
+
+.react-flow {
+  --xy-background-color: rgba(248, 250, 252, 0.4);
+  --xy-edge-stroke: #94a3b8;
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: #6366f1;
+  --xy-node-boxshadow-selected: 0 0 0 3px rgba(99, 102, 241, 0.45);
+  --xy-attribution-background-color: transparent;
+  font-family: inherit;
+}
+
+.react-flow__node {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.react-flow__controls {
+  border-radius: 0.65rem;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+.react-flow__controls-button {
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  width: 30px;
+  height: 30px;
+}
+
+.react-flow__controls-button:hover {
+  background: #f1f5f9;
+}
+
+.react-flow__minimap {
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.react-flow__edge-textbg {
+  fill: #ffffff;
+}
+
+.react-flow__edge-text {
+  fill: #475569;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.graph-edge-virtual {
+  stroke-dasharray: 6 5;
+}
+
+@media (prefers-color-scheme: dark) {
+  .react-flow {
+    --xy-background-color: rgba(15, 23, 42, 0.55);
+    --xy-edge-stroke: #475569;
+    --xy-edge-stroke-selected: #818cf8;
+    --xy-node-boxshadow-selected: 0 0 0 3px rgba(129, 140, 248, 0.5);
+  }
+
+  .react-flow__controls {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+
+  .react-flow__controls-button {
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+    fill: #e2e8f0;
+  }
+
+  .react-flow__controls-button:hover {
+    background: #334155;
+  }
+
+  .react-flow__controls-button svg {
+    fill: #e2e8f0;
+  }
+
+  .react-flow__minimap {
+    background: #0f172a;
+  }
+
+  .react-flow__edge-textbg {
+    fill: #1e293b;
+  }
+
+  .react-flow__edge-text {
+    fill: #cbd5e1;
+  }
 }

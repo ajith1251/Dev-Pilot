@@ -1811,3 +1811,72 @@ surface + multi-repo acquisition wiring) is NOT started.**
   when `DATABASE_URL` is set; harmless and idempotent, but it does accumulate
   in the shared dev DB. The org persistence test now tolerates this.
 
+### Session 26 (August 4, 2026) — Phase 19C part 2: Interactive EKG Visualization ✅
+
+Implemented the final Phase 19C visualization direction (Phase 19D not
+started). Replaced the legacy custom SVG canvas on `/dashboard/engineering-graph`
+with a **production graph engine** (`@xyflow/react` React Flow v12) using
+d3-force strictly as a seeded, deterministic layout algorithm.
+
+**Backend (DevPilot/backend):**
+
+- `app/services/engineering_graph_service.py` — `diff_versions(from_version,
+  to_version=None)` returns `{from_version, to_version, added_nodes,
+  removed_nodes, changed_edges, counts, per_version}` (incremental change-set,
+  `ValueError` on invalid versions); `_fire_graph_broadcast`/
+  `_run_graph_broadcast` + an `increment_version` broadcast hook (fire-and-forget).
+- `app/services/ws_manager.py` — `broadcast_graph_update` on the `__graph__`
+  channel. `app/api/v1/ws.py` — `WS /api/v1/ws/graph` (snapshot on connect +
+  live `version_incremented`). `app/api/v1/engineering_graph.py` — `GET
+  /api/v1/graph/diff` (HTTP 400 on invalid versions).
+- Tests: `TestVersionDiff`, diff-endpoint tests, `TestGraphWebSocket`,
+  `TestBroadcastGraphUpdate` → graph+ws suites **83 passed**.
+- `scripts/demo_phase19c.py` — demos A–F, deterministic, no LLM: A bounded
+  neighborhood expansion depth 1/2/3 + facets; B org merge / local isolation /
+  bridge traversal (fixed: seed nodes tagged with their repo id; demo C depth
+  3 to reach the full lineage); C palette contract (frontend covers 100% of the
+  28 node types + 27 relationships) + relationship histogram + filtered edges;
+  D `diff_versions` change-set; E live WS snapshot + `version_incremented` via
+  `client.portal.call(lambda: graph.increment_version(...))`; F 3000-node
+  ingest/query/neighborhood latency. **ALL PASS** (with `--json` for CI).
+
+**Frontend (DevPilot/frontend):**
+
+- `src/lib/graph/graphModel.ts` — pure model: `NODE_CATEGORY`/`NODE_HEX` (28
+  types) + `RELATIONSHIP_HEX` (27 rels), `computeForceLayout` (seeded LCG,
+  `initialPositions`), `applyViewFilters` (edge survives iff both endpoints),
+  `snapshotFacets`, `summarizeDiff`.
+- `src/lib/graph/useGraphSocket.ts` — module-level singleton WebSocket +
+  `useSyncExternalStore`, exponential-backoff reconnects (1s→15s), pure
+  `deriveGraphWsUrl`.
+- `src/components/graph/InteractiveGraph.tsx` — React Flow engine: custom
+  `GraphNodeView`, cached layout per graph signature, highlight/dim neighbors,
+  MiniMap + relayout/fullscreen controls, virtualization above 200 nodes.
+- `src/app/dashboard/engineering-graph/page.tsx` — toolbar (search, node-type /
+  relationship / repo filters with counts, depth 1–3, Fit/Relayout/Refresh/
+  Collapse/Clear), live WS badge + notice, stats cards, InteractiveGraph +
+  provenance panel (evidence-only, prohibited-key filter), timeline with
+  version-diff panel, relationship legend, breadcrumbs, keyboard shortcuts.
+- `vitest.config.ts` + `test` scripts; `globals.css` React Flow theming; root
+  layout imports `@xyflow/react/dist/style.css`.
+
+**Validation:**
+
+- Backend full deterministic suite (`-m "not live"`): **1580 passed / 18
+  skipped / 1 failed** (the 1 failure remains the pre-existing
+  `test_wrapper_skips_cleanly_without_provider` env quirk). No regressions.
+- Frontend: **29 vitest tests passed** (graphModel 12, registryContract 4,
+  useGraphSocket 4, engineeringGraph API 3) and `npm run build` EXIT=0
+  (engineering-graph route 74.7 kB / 162 kB first load).
+- `scripts/demo_phase19c.py` ALL PASS.
+
+**Docs:** `docs/GRAPH_VISUALIZATION.md` (new), `docs/ENGINEERING_KNOWLEDGE_GRAPH.md`
+(API/WS/frontend/testing/demos + new §22), `docs/ARCHITECTURE.md` (frontend),
+`README.md`, and this log. Completion report:
+`workflow-status/PHASE19C_COMPLETION_REPORT.md`.
+
+**Caveats carried forward:** the pre-existing `test_wrapper_skips_cleanly_without_provider`
+env failure; demo H stale-PG flake; org-scope queries + multi-repo acquisition
+wiring into the graph UI remain the open Phase 19C item (deferred to a later
+session); all Phase 19C changes are uncommitted (baseline `8598153`).
+

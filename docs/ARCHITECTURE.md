@@ -437,9 +437,24 @@ Dashboard (Next.js 14, TypeScript, Tailwind CSS)
     ├── /dashboard/runs/[id]           — Run detail timeline (Phase 10)
     ├── /dashboard/durability          — Durability report (Phase 19)
     ├── /dashboard/engineering-graph   — EKG graph explorer (Phase 18)
+    │                                    + interactive React Flow view,
+    │                                    filters, timeline diff, live
+    │                                    WebSocket updates (Phase 19C)
     ├── /dashboard/organization-graph  — Organization graph (Phase 12)
     └── /dashboard/providers           — Provider router observability (Phase 19B)
 ```
+
+The engineering-graph explorer runs on a production graph engine:
+`@xyflow/react` (React Flow v12) owns pan/zoom/drag/fit/minimap/controls/
+fullscreen and virtualized rendering, while `d3-force@3` is used only as a
+**seeded, deterministic layout algorithm** (`computeForceLayout` — LCG seed 42,
+per-signature position cache, `initialPositions` reseeding for incremental
+expansion). Pure transforms (`applyViewFilters`, `snapshotFacets`,
+`summarizeDiff`) live in `frontend/src/lib/graph/graphModel.ts` and are
+unit-tested under Node; live graph updates stream from
+`WS /api/v1/ws/graph` through a singleton `useGraphSocket` hook
+(`useSyncExternalStore` + exponential-backoff reconnects). Full design:
+`docs/GRAPH_VISUALIZATION.md`.
 
 ---
 
