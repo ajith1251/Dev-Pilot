@@ -1,4 +1,4 @@
-# Phase 19C Completion Report — Interactive Engineering Knowledge Graph Visualization
+# Phase 19C Completion Report — Interactive EKG Visualization, Multi-Repo Acquisition & Org-Scope Queries
 
 > **Status**: COMPLETE ✅
 > **Date**: August 4, 2026
@@ -9,28 +9,36 @@
 > live `WS /api/v1/ws/graph` updates, graph timeline via `GET /api/v1/graph/diff`
 > (added/removed/changed per-version change-sets), evidence-only provenance
 > panel, 3000-node performance bounds, 29 frontend vitest tests + backend
-> diff/WS suites, demos A–F. **Phase 19D is NOT started.**
+> diff/WS suites, demos A–F. **Closed out (Sessions 26–27):** multi-repo remote
+> acquisition (`POST /api/v1/graph/org/acquire-multi`, CLI, frontend manifest
+> form), org-scope queries across linked repositories (API/CLI/frontend,
+> `scope=auto|local|organization`), and the demo-H stale-PG fix
+> (`select_tests_for_changes` newest-suite scoping). **Phase 19D is NOT started.**
 
 ---
 
 ## 1. Status & Test Baseline
 
-| Metric | Before (Phase 19C part 1) | After (Phase 19C part 2) |
+| Metric | Before (Phase 19C part 1) | After (Phase 19C COMPLETE) |
 |--------|---------------------------|--------------------------|
-| Backend deterministic suite (`-m "not live"`) | 1568 passed / 18 skipped / 1 failed | **1580 passed / 18 skipped / 1 failed** (the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) |
+| Backend deterministic suite (`-m "not live"`) | 1568 passed / 18 skipped / 1 failed | **1602 passed / 18 skipped / 1 failed** (the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) |
 | Backend graph + WebSocket suites | green | **83 passed** (incl. `TestVersionDiff`, diff endpoints, `TestGraphWebSocket`, `TestBroadcastGraphUpdate`) |
+| Organization-graph + multi-repo acquisition suites | 37 passed | **57 passed** |
 | Frontend vitest | — (no runner) | **29 passed** (4 files) |
 | Frontend `next build` | ✅ | ✅ EXIT=0 (engineering-graph route 74.7 kB / 162 kB) |
 | `scripts/demo_phase19c.py` (demos A–F) | — | **ALL PASS** |
+| `scripts/demo_phase18.py` (demos A–I, incl. org-scope query + impact test selection) | — | **ALL PASS** |
 | Live LLM calls in tests | 0 | **0** (fully deterministic) |
 
 | Path | Result |
 |---|---|
-| Backend full suite | **1580 passed · 18 skipped · 1 pre-existing failure** |
+| Backend full suite | **1602 passed · 18 skipped · 1 pre-existing failure** |
 | Backend graph + WS targeted | **83 passed · 0 failed** |
+| Organization-graph + multi-repo acquisition | **57 passed · 0 failed** |
 | Frontend vitest | **29 passed · 0 failed** |
 | Frontend `next build` | ✅ EXIT=0 |
 | Demo A–F (interactive / cross-repo / highlighting / timeline / WS / perf) | **ALL PASS** |
+| Demo A–I (incl. demo G org-scope query, demo H impact test selection, demo I namespaces) | **ALL PASS** |
 
 ---
 
@@ -49,6 +57,16 @@ for incremental expansion.
 Backend additions keep the same invariant as all of Phase 18 — LLMs only
 propose, deterministic gates decide — and extend the evidence-only API with a
 version-diff change-set endpoint and a live WebSocket broadcast channel.
+
+**Close-out (Sessions 26–27):** multi-repo remote acquisition materializes
+several repository namespaces in one deterministic pass (`source=local` offline
+ingest or `source=github` clone; declared cross-repo `relationships` registered
+via `link_repositories` only — never LLM-inferred); org-scope queries route
+retrieval across explicitly linked repositories (`scope=auto|local|organization`)
+through `GET /api/v1/graph/org/query` and `org/traversal/{id}`, surfaced in the
+CLI (`graph org-query`) and the `/dashboard/organization-graph` scope selector;
+and `select_tests_for_changes` was hardened against accumulated-PG drift by
+scoping each changed path to its newest `TEST_SUITE` (keyed on `graph_version`).
 
 ---
 
@@ -131,6 +149,31 @@ Docs/state:
   (API/WS/frontend/testing/demos + new §22), `workflow-status/PROJECT_STATE.md`
   (Session 26).
 
+### Session 27 close-out (multi-repo acquisition + org-graph UI wiring + demo-H fix)
+
+Backend:
+
+- `app/services/organization_graph_service.py` — `acquire_multi(manifest)`
+  (deterministic multi-repo materialization; `source=local|github`; declared
+  cross-repo relationships), org-scope query routing (`QueryScope.AUTO/LOCAL/
+  ORGANIZATION`).
+- `app/services/engineering_graph_service.py` — `select_tests_for_changes`
+  scoped to the newest TEST_SUITE per changed path (keyed on `graph_version`;
+  raw reverse-index walk to bypass `MAX_EDGES_PER_NODE`).
+- `app/api/v1/engineering_graph.py` — `POST /org/acquire-multi` +
+  org query/traversal endpoints. Orchestrator + CLI wiring.
+- `backend/tests/test_organization_graph.py`,
+  `backend/tests/test_multi_repo_acquisition.py` (28 new tests),
+  `backend/tests/test_engineering_graph.py` (2 demo-H regression tests).
+
+Frontend:
+
+- `src/lib/api/organizationGraph.ts` — `acquireMulti()`, `query(scope)`,
+  `traversal()` contract; `src/lib/api/organizationGraph.test.ts`.
+- `src/app/dashboard/organization-graph/page.tsx` — scope selector
+  (auto/local/organization), query→graph merge + `in_repository` clustering,
+  node Expand → cross-repo traversal, acquire-manifest form.
+
 ---
 
 ## 5. Visualization Architecture
@@ -193,6 +236,11 @@ InteractiveGraph.tsx (React Flow v12)
 | `GET /api/v1/graph/diff?from_version=&to_version=` | change-set: `added_nodes`, `removed_nodes`, `changed_edges`, `counts`, `per_version`; 400 on invalid versions |
 | `WS /api/v1/ws/graph` | `{"type":"graph_update","event_type":"snapshot",...}` on connect; `version_incremented` on every bump |
 | `broadcast_graph_update` (ws_manager) | `__graph__` channel; fire-and-forget |
+| `GET /api/v1/graph/org/query?q=&scope=auto\|local\|organization&repository_id=&limit=` | org-scope retrieval across explicitly linked repos; local scope isolated to one namespace |
+| `GET /api/v1/graph/org/traversal/{id}?depth=&max_nodes=` | bounded cross-repository traversal |
+| `GET /api/v1/graph/org/{stats,repositories,cross-edges}` · `POST /org/repositories` · `/org/link` | org graph administration + evidence |
+| `POST /api/v1/graph/org/acquire-multi` | manifest of repo specs → acquire + link + ingest (Phase 19C) |
+| CLI `graph org-{stats,repositories,cross-edges,query,traversal,acquire-multi}` | org operations from the terminal with `--json` |
 
 ---
 
@@ -228,25 +276,32 @@ InteractiveGraph.tsx (React Flow v12)
   `MAX_EDGES_PER_NODE` (2 regression tests in `test_engineering_graph.py`)
 - Layout caching is per-page-session (browser memory), not persisted
 - The timeline diff is node/edge-level (no positional or payload diffs)
-- Org-scope (cross-repo namespace) queries + multi-repo remote acquisition wiring
-  into the graph UI — multi-repo acquisition is DONE; only org-scope API/UI queries
-  remain the open Phase 19C item
+- GitHub-source acquisition in `org/acquire-multi` requires an injected
+  acquisition service (deterministic `source=local` works offline); remote
+  cloning is exercised via the acquisition service unit tests, not a paid network
+- Org-scope queries are exposed via API/CLI/frontend but the org-graph page
+  remains a force-directed view (no React Flow timeline/WS surface yet — Phase 19D)
 
 ---
 
 ## Verdict
 
 - **PHASE 19C COMPLETE**: **YES** ✅
-- **FINAL TEST BASELINE**: backend **1580 passed / 18 skipped / 1 failed**
-  (pre-existing env quirk only); graph+WS **83 passed**; frontend **29 vitest
-  passed**; `next build` EXIT=0; demo A–F **ALL PASS**
+- **FINAL TEST BASELINE**: backend **1602 passed / 18 skipped / 1 failed**
+  (pre-existing env quirk only); graph+WS **83 passed**; org-graph + multi-repo
+  acquisition **57 passed**; frontend **29 vitest passed**; `next build` EXIT=0;
+  demos A–F (`demo_phase19c.py`) and demos A–I (`demo_phase18.py`) **ALL PASS**
 - **Per-capability**:
   - Interactive exploration — **PASS** (demo A)
-  - Cross-repo navigation — **PASS** (demo B, part 1 org backend)
+  - Cross-repo navigation — **PASS** (demo B, org backend + demo I namespaces)
   - Relationship highlighting / palette contract — **PASS** (demo C +
     registryContract tests)
   - Graph timeline / version diff — **PASS** (demo D + `TestVersionDiff`)
   - Live WebSocket updates — **PASS** (demo E + `TestGraphWebSocket`)
   - Search & filter performance — **PASS** (demo F + perf smoke tests)
+  - Multi-repo remote acquisition — **PASS** (demo G + `test_multi_repo_acquisition.py`)
+  - Org-scope queries / cross-repo namespaces — **PASS** (API/CLI/frontend +
+    `test_organization_graph.py`)
+  - EKG-driven test selection vs accumulated PG — **PASS** (demo H + 2 regression tests)
   - Frontend build + tests — **PASS**
 - **PHASE 19D READY**: **YES** (Phase 19D not started; scope guarded)

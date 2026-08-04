@@ -1,8 +1,8 @@
 # Engineering Knowledge Graph (Phase 18)
 
-> **Status**: Complete, incl. Phase 19C part 1 (cross-repo namespaces) + part 2 (interactive visualization).
+> **Status**: Complete, incl. Phase 19C (cross-repo namespaces, interactive visualization, multi-repo acquisition + org-scope queries).
 > **Last updated**: August 4, 2026
-> **Test baseline**: 1580 passed / 18 skipped / 1 failed (live PostgreSQL 18.4; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) + 29 frontend vitest tests green
+> **Test baseline**: 1602 passed / 18 skipped / 1 failed (live PostgreSQL 18.4; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) + 29 frontend vitest tests green
 
 ---
 

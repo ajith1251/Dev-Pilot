@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 4, 2026 (session 25 — Phase 19C part 1: cross-repo namespaces + force-directed graph viz)
-> **Current Phase**: Phase 19C PARTIAL ✅ — cross-repository knowledge namespaces (backend `OrganizationGraphService` + demo I) and frontend force-directed graph viz (shared `ForceDirectedGraph` + engineering-graph neighborhood view) DONE; remaining 19C: cross-repo namespaces via the API/UI surface + multi-repo remote acquisition wiring (see Session 25 / items 15-16). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1568 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **37 passed** (roundtrip test now idempotent against accumulated PG data).
+> **Last updated**: August 4, 2026 (session 27 — Phase 19C COMPLETE: multi-repo acquisition + org-graph UI wiring + demo-H stale-PG fix)
+> **Current Phase**: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1602 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **57 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data).
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -1876,7 +1876,70 @@ d3-force strictly as a seeded, deterministic layout algorithm.
 `workflow-status/PHASE19C_COMPLETION_REPORT.md`.
 
 **Caveats carried forward:** the pre-existing `test_wrapper_skips_cleanly_without_provider`
-env failure; org-scope (cross-repo namespace) API/CLI/frontend queries remain the
-open Phase 19C item (deferred to a later session). Phase 19C is otherwise complete
-and committed (`5cc371a`, `1644fb3`, demo-H fix).
+env failure. All Phase 19C items — interactive viz, multi-repo acquisition,
+org-graph UI wiring, org-scope queries, and the demo-H stale-PG fix — are
+complete and committed (`5cc371a`, `1644fb3`, `2cc929b`; see Session 27).
+
+### Session 27 (August 4, 2026) — Phase 19C close-out: Multi-Repo Acquisition + Org-Graph UI Wiring + Demo-H Fix ✅
+
+Closed the final Phase 19C directions left open by Sessions 25–26. Phase 19C is
+now fully complete; no Phase 19D started.
+
+**Multi-repo remote acquisition (backend):**
+
+- `app/services/organization_graph_service.py` — `acquire_multi(manifest)`
+  materializes multiple repository namespaces in one deterministic,
+  evidence-only pass: `source="local"` ingests an existing checkout (offline),
+  `source="github"` clones via the acquisition service; each spec may declare
+  explicit cross-repository `relationships` (registered via `link_repositories`
+  only — never LLM-inferred). Bounded by `MAX_REPOSITORIES_PER_ORG`.
+- `app/api/v1/engineering_graph.py` — `POST /api/v1/graph/org/acquire-multi`
+  (flat manifest array). Orchestrator + CLI wiring:
+  `python -m app.cli graph org-acquire-multi --manifest <json> [--ingest]`.
+- Frontend: `orgGraphApi.acquireMulti()` (`src/lib/api/organizationGraph.ts`) +
+  "Acquire + Link (Phase 19C)" manifest form on `/dashboard/organization-graph`.
+
+**Org-scope queries (cross-repo namespaces via API/CLI/frontend):**
+
+- API: `GET /api/v1/graph/org/query?q=&scope=auto|local|organization&repository_id=`
+  (scope-routed, `QueryScope.AUTO` merges linked repos when the planner decides),
+  `GET /api/v1/graph/org/traversal/{id}`, `GET /api/v1/graph/org/stats`,
+  `/org/repositories`, `/org/cross-edges`, `POST /org/repositories`, `/org/link`.
+- CLI: `org-stats`, `org-repositories`, `org-cross-edges`, `org-query`,
+  `org-traversal`.
+- Frontend: org page scope selector (`auto` / `local` isolated / `organization`
+  wide), query → graph merge with `in_repository` clustering, node Expand →
+  cross-repo traversal, register/link forms.
+- 28 new backend tests (org API endpoints, org-scope merging, multi-repo
+  acquisition + wiring); frontend `organizationGraph.test.ts` contract tests.
+  Demo G (`demo_phase18.py`) + demo I PASS in-memory and against live PG.
+
+**Demo-H stale-PG fix (accumulated-shared-PG regression):**
+
+- `select_tests_for_changes` scoped to the **newest TEST_SUITE per changed
+  path** — recency keyed on `graph_version` (global monotonic counter bumped
+  per ingested run and on re-ingest), then `created_at`, then `node_id` as a
+  stable tiebreaker; iterates the raw reverse index to bypass
+  `MAX_EDGES_PER_NODE` so the newest run's patch is never hidden behind
+  historical edges. Two regression tests in `test_engineering_graph.py`
+  (stale-bleed + re-ingested-run-wins-despite-older-created_at). Verified
+  against an accumulated in-memory graph and the full suite.
+
+**Validation:**
+
+- Backend full deterministic suite (`-m "not live"`): **1602 passed / 18
+  skipped / 1 failed** (the 1 failure remains the pre-existing
+  `test_wrapper_skips_cleanly_without_provider` env quirk). No regressions.
+- Organization-graph + multi-repo acquisition suites: **57 passed**.
+- `scripts/demo_phase18.py` (demos A–I) **ALL PASS** — incl. G (org-scope
+  query) and H (impact test selection, stale-PG fix exercised).
+- Frontend: **29 vitest tests passed** + `npm run build` EXIT=0.
+
+**Docs:** `AGENTS.md` (session memory), this log, and
+`workflow-status/PHASE19C_COMPLETION_REPORT.md` updated to the final baseline.
+
+**Caveats carried forward:** the pre-existing `test_wrapper_skips_cleanly_without_provider`
+env failure. All Phase 19C items are committed: `5cc371a` (interactive viz),
+`1644fb3` (multi-repo acquisition + org-graph UI wiring), `2cc929b` (demo-H
+fix), `6f88fd1` (state/docs).
 

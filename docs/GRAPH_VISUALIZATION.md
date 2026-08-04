@@ -2,7 +2,7 @@
 
 > **Status**: Complete.
 > **Last updated**: August 4, 2026
-> **Test baseline**: backend 1580 passed / 18 skipped / 1 failed (the 1 failure is the
+> **Test baseline**: backend 1602 passed / 18 skipped / 1 failed (the 1 failure is the
 > pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk) · frontend 29 vitest
 > tests green · `npm run build` clean (EXIT 0) · `scripts/demo_phase19c.py` ALL PASS.
 
