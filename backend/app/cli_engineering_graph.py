@@ -14,6 +14,7 @@ Phase 19A — Organization Knowledge Graph:
     python -m app.cli graph org-cross-edges
     python -m app.cli graph org-query <query> [--scope auto|local|organization] [--repository-id <id>]
     python -m app.cli graph org-traversal <node_id> [--depth N]
+    python -m app.cli graph org-acquire-multi --manifest <json> [--ingest]
 """
 
 from __future__ import annotations
@@ -92,6 +93,20 @@ def add_cli_commands(parent_parser) -> None:
     ot_parser.add_argument("--depth", type=int, default=2, help="Traversal depth")
     ot_parser.add_argument("--max-nodes", type=int, default=50, help="Max nodes")
     ot_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    # Phase 19C — multi-repo acquisition → organization graph.
+    oam_parser = graph_sub.add_parser(
+        "org-acquire-multi",
+        help="Acquire + link multiple repositories into the org graph (Phase 19C)",
+    )
+    oam_parser.add_argument(
+        "--manifest", type=str, required=True,
+        help="Path to a JSON manifest: list of repo spec objects "
+             "(repository_id, source, path|owner+repo, relationships[]).",
+    )
+    oam_parser.add_argument("--ingest", action="store_true", default=False,
+                            help="Seed per-repo FILE evidence from the checkout")
+    oam_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
 
 def _get_service():
@@ -462,4 +477,70 @@ async def run_graph_org_traversal(
         print(f"  [{i}] [{n.node_type.value}] {n.name[:44]} (repo:{repo})")
 
     print(f"  Truncated: {result.truncated}")
+    print(f"{'='*60}\n")
+
+
+async def run_graph_org_acquire_multi(
+    manifest_path: str, ingest: bool = False, json_output: bool = False
+) -> None:
+    """Acquire + link multiple repositories into the org graph (Phase 19C).
+
+    The manifest is a JSON list of repository spec objects::
+        [
+          {"repository_id": "acme-api", "source": "local", "path": "/path/to/api"},
+          {"repository_id": "acme-web", "source": "local", "path": "/path/to/web",
+           "relationships": [{"target_repository_id": "acme-api",
+                              "relationship": "depends_on_repository"}]}
+        ]
+    """
+    _ensure_utf8_stdout()
+    import json as _json
+    import os as _os
+    from app.models.engineering_graph import MultiRepoAcquisitionSpec
+
+    if not _os.path.isfile(manifest_path):
+        print(f"Manifest not found: {manifest_path}")
+        return
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            raw = _json.load(fh)
+    except _json.JSONDecodeError as exc:
+        print(f"Invalid manifest JSON: {exc}")
+        return
+    if not isinstance(raw, list):
+        print("Manifest must be a JSON list of repository specs.")
+        return
+    try:
+        specs = [MultiRepoAcquisitionSpec(**s) for s in raw]
+    except Exception as exc:
+        print(f"Invalid manifest: {exc}")
+        return
+
+    org = _get_org_service()
+    from app.services.acquisition import RepositoryAcquisitionService
+
+    result = await org.acquire_and_link_repositories(
+        specs, acquisition_service=RepositoryAcquisitionService(), ingest=ingest
+    )
+
+    if json_output:
+        print(_json.dumps(result, indent=2, default=str))
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  Multi-Repo Acquisition — Organization Graph")
+    print(f"{'='*60}\n")
+    print(f"  Repositories acquired: {result['repositories_acquired']}")
+    print(f"  Cross-repository edges: {result['relationships']}")
+    print(f"  Evidence files seeded: {result['ingested_files']}")
+    print(f"  Persisted records: {result['persisted_records']}")
+    print(f"\n  Registered namespaces:")
+    for ns in result["namespaces"]:
+        print(f"    {ns['repository_id']:<20} {ns.get('name', '')[:30]} ({ns.get('source', '')})")
+    if result["cross_edges"]:
+        print(f"\n  Explicit bridges:")
+        for e in result["cross_edges"]:
+            print(f"    {e['source_repository_id']:<18} -[{e['relationship']}]-> "
+                  f"{e['target_repository_id']:<18} w={round(e.get('weight', 1.0), 2)}")
+    print(f"\n  Org version: {org.current_version()}")
     print(f"{'='*60}\n")

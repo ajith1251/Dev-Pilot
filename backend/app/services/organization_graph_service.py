@@ -43,6 +43,8 @@ database is configured, with an in-memory fallback identical to Phase 18.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.core.logging import logger
@@ -53,6 +55,7 @@ from app.db.models import (
 from app.models.engineering_graph import (
     DEFAULT_REPOSITORY_ID,
     MAX_CROSS_EDGES_PER_REPO,
+    MAX_NODES_PER_RUN_INGEST,
     MAX_REPOSITORIES_PER_ORG,
     EKEdge,
     EKNode,
@@ -399,6 +402,212 @@ class OrganizationKnowledgeGraphService:
             updated_edges=[edge.edge_id],
         )
         return edge
+
+    # ── Multi-repository acquisition (§3) ────────────────────────
+
+    async def acquire_and_link_repositories(
+        self,
+        specs: List["MultiRepoAcquisitionSpec"],
+        *,
+        acquisition_service: Optional[Any] = None,
+        ingest: bool = True,
+    ) -> Dict[str, Any]:
+        """Acquire multiple repositories and wire them into the organization graph.
+
+        This is the missing Phase 19C piece: a deterministic, evidence-only
+        orchestrator that turns a set of repository specifications into registered
+        namespaces + explicit cross-repository edges in the org graph.
+
+        For each spec:
+          - ``source=local``: validates ``path`` is a directory and uses it directly
+            (no network, fully deterministic — used by tests/demos).
+          - ``source=github``: clones via ``acquisition_service`` (default
+            ``RepositoryAcquisitionService``) into a temporary workspace. Never
+            executes repository code.
+
+        When ``ingest=True``, a lightweight, deterministic evidence pass seeds the
+        per-repository graph from the local checkout (REPOSITORY + FILE nodes +
+        CONTAINS edges) so cross-repository traversal surfaces real content. The
+        pass uses filesystem scanning only — no LLM, no symbol-graph indexing
+        (that stays the responsibility of the run pipeline).
+
+        Relationships declared on each spec are validated and applied via
+        ``link_repositories`` (deterministic, registry-allowed only). Finally the
+        org version is bumped so live WS subscribers see the new bridges.
+        """
+        if not specs:
+            raise ValueError("at least one repository specification is required")
+        if len(specs) > MAX_REPOSITORIES_PER_ORG:
+            raise RuntimeError(
+                f"refusing acquisition of {len(specs)} repositories; "
+                f"org limit is {MAX_REPOSITORIES_PER_ORG}"
+            )
+
+        ids = [s.repository_id for s in specs]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"duplicate repository_id in specs: {ids}")
+
+        # Relationships may only reference repositories declared in the same
+        # acquisition batch — never dangling endpoints.
+        known = set(ids)
+        for s in specs:
+            for link in s.relationships:
+                if link.target_repository_id not in known:
+                    raise ValueError(
+                        f"relationship from {s.repository_id} targets unknown "
+                        f"repository: {link.target_repository_id}"
+                    )
+
+        acq = acquisition_service  # injected (tests/mock) or default
+        namespaces: List[Dict[str, Any]] = []
+        ingested_files = 0
+
+        for spec in specs:
+            local_path = await self._acquire_local_path(spec, acq)
+            try:
+                ns = self.register_repository(
+                    spec.repository_id,
+                    name=spec.name or spec.repository_id,
+                    path=local_path,
+                    source_type=spec.source,
+                    organization_id="default",
+                    metadata={
+                        "source": spec.source,
+                        **({"owner": spec.owner, "repo": spec.repo} if spec.source == "github" else {}),
+                    },
+                )
+                namespaces.append(ns.summary())
+                if ingest and local_path and os.path.isdir(local_path):
+                    ingested_files += self._seed_repository_evidence(spec.repository_id, local_path)
+            finally:
+                # Local-path acquisitions keep their working tree; cloned
+                # workspaces are left in place (they're under the acquisition
+                # workspace base) and surfaced via `path` for provenance.
+                pass
+
+        cross_edges: List[Dict[str, Any]] = []
+        for spec in specs:
+            for link in spec.relationships:
+                try:
+                    rel = EKRelationshipType(link.relationship)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid cross-repository relationship '{link.relationship}' "
+                        f"for {spec.repository_id}"
+                    ) from exc
+                edge = self.link_repositories(
+                    spec.repository_id,
+                    link.target_repository_id,
+                    rel,
+                    weight=link.weight,
+                    metadata={"source": "acquire_and_link"},
+                    provenance={"source": "multi_repo_acquisition", "spec": spec.repository_id},
+                )
+                cross_edges.append(edge.summary())
+
+        persisted = await self.synchronize()
+        self._org_graph.increment_version(
+            summary=f"Acquired + linked {len(specs)} repositories",
+            updated_nodes=[_repo_node_id(s.repository_id) for s in specs],
+        )
+
+        return {
+            "organization_id": "default",
+            "repositories_acquired": len(namespaces),
+            "namespaces": namespaces,
+            "cross_edges": cross_edges,
+            "relationships": len(cross_edges),
+            "ingested_files": ingested_files,
+            "persisted_records": persisted,
+            "scope": "organization",
+        }
+
+    async def _acquire_local_path(
+        self, spec: "MultiRepoAcquisitionSpec", acquisition_service: Optional[Any]
+    ) -> str:
+        """Materialize a local working copy for one spec (no network for `local`)."""
+        if spec.source == "local":
+            if not spec.path or not os.path.isdir(spec.path):
+                raise ValueError(
+                    f"local source requires an existing directory path for "
+                    f"{spec.repository_id}: got {spec.path!r}"
+                )
+            return str(Path(spec.path).resolve())
+        if spec.source == "github":
+            if not spec.owner or not spec.repo:
+                raise ValueError(
+                    f"github source requires owner + repo for {spec.repository_id}"
+                )
+            if acquisition_service is None:
+                raise ValueError(
+                    f"github acquisition for {spec.repository_id} requires an "
+                    "acquisition_service to be supplied (real clones need a "
+                    "GitHub token + network; tests use a fake service)"
+                )
+            logger.info("Acquiring %s/%s for repository %s", spec.owner, spec.repo, spec.repository_id)
+            meta = await acquisition_service.acquire(
+                owner=spec.owner,
+                repo=spec.repo,
+                ref=spec.ref or "HEAD",
+                shallow=True,
+                depth=spec.depth,
+            )
+            return meta.local_path
+        raise ValueError(
+            f"unsupported source '{spec.source}' for {spec.repository_id} "
+            "(expected 'local' or 'github')"
+        )
+
+    def _seed_repository_evidence(self, repository_id: str, path: str) -> int:
+        """Seed lightweight, deterministic FILE evidence into the per-repo graph.
+
+        Uses filesystem scanning only (no LLM, no symbol extraction). Bounded by
+        ``MAX_NODES_PER_RUN_INGEST`` so it cannot blow up the graph or the suite.
+        Returns the number of FILE nodes created.
+        """
+        from app.services.engineering_graph_service import EngineeringKnowledgeGraphService
+
+        graph = self._graphs.get(repository_id)
+        if graph is None:
+            return 0
+        # REPOSITORY node within the per-repo namespace.
+        repo_node = graph.add_node(
+            EKNodeType.REPOSITORY,
+            name=repository_id,
+            node_id=_repo_node_id(repository_id),
+            source_ref=repository_id,
+            source_type="repository",
+            qualified_name=repository_id,
+            payload={"path": str(path)[:200]},
+            provenance={"source": "multi_repo_acquisition"},
+        )
+        seeded = 0
+        for root, _dirs, files in os.walk(path):
+            for fname in files:
+                if fname.startswith(".") or fname.endswith((".pyc", ".so", ".png", ".jpg", ".jpeg", ".gif", ".pdf")):
+                    continue
+                rel = os.path.relpath(os.path.join(root, fname), path)
+                if rel.startswith(".git" + os.sep):
+                    continue
+                file_node = graph.add_node(
+                    EKNodeType.FILE,
+                    fname,
+                    source_ref=f"{repository_id}:{rel}",
+                    source_type="file",
+                    qualified_name=f"{repository_id}/{rel}",
+                    payload={"path": rel[:200]},
+                    provenance={"repository_id": repository_id, "source": "filesystem"},
+                )
+                graph.add_edge(
+                    repo_node.node_id, file_node.node_id,
+                    EKRelationshipType.CONTAINS, provenance={"source": "multi_repo_acquisition"},
+                )
+                seeded += 1
+                if seeded >= MAX_NODES_PER_RUN_INGEST:
+                    return seeded
+            if seeded >= MAX_NODES_PER_RUN_INGEST:
+                break
+        return seeded
 
     def neighbors_of(self, repository_id: str) -> List[Tuple[str, EKRelationshipType]]:
         """Repositories reachable from `repository_id` + the relationship."""

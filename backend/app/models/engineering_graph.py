@@ -573,6 +573,81 @@ class CrossRepositoryEdge(BaseModel):
         }
 
 
+# ── Phase 19C: Multi-Repository Acquisition ──────────────────────
+
+
+class CrossRepositoryLinkSpec(BaseModel):
+    """A single explicit cross-repository relationship produced by
+    multi-repository acquisition.
+
+    These are deterministic, never LLM-inferred: the caller declares which
+    repositories are linked and how. ``target_repository_id`` must be a
+    repository_id present in the same acquisition manifest.
+    """
+
+    target_repository_id: str = Field(
+        description="Repository that is the target of this link"
+    )
+    relationship: str = Field(
+        description="Cross-repository relationship value "
+                    "(depends_on_repository | shares_library | ...)"
+    )
+    weight: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "target_repository_id": self.target_repository_id[:64],
+            "relationship": self.relationship,
+            "weight": round(self.weight, 2),
+        }
+
+
+class MultiRepoAcquisitionSpec(BaseModel):
+    """Specification for one repository in a multi-repo acquisition.
+
+    ``source`` selects how the repository is materialized on disk:
+
+    - ``local``: use an existing checkout at ``path`` (no network, deterministic —
+      used by tests/demos). ``path`` must be an existing directory.
+    - ``github``: clone via ``RepositoryAcquisitionService`` from
+      ``owner/repo`` (+ optional ``ref``/``depth``). Requires a network path
+      and a GitHub token in production; never runs repository code.
+
+    ``relationships`` declare the explicit, deterministic cross-repository edges
+    the acquisition should create from this repository to its declared targets.
+    """
+
+    repository_id: str = Field(description="Stable namespace for this repository")
+    name: str = Field(default="", max_length=200, description="Display name")
+    source: str = Field(
+        default="local", max_length=16,
+        description="Acquisition source: local | github",
+    )
+    owner: str = Field(default="", max_length=64, description="GitHub owner (github)")
+    repo: str = Field(default="", max_length=64, description="GitHub repo name (github)")
+    path: str = Field(default="", max_length=1024, description="Local checkout path (local)")
+    ref: str = Field(default="", max_length=64, description="Git ref (github, default HEAD)")
+    depth: int = Field(default=1, ge=1, le=64, description="Shallow clone depth (github)")
+    relationships: List[CrossRepositoryLinkSpec] = Field(
+        default_factory=list,
+        max_length=MAX_CROSS_EDGES_PER_REPO,
+        description="Explicit cross-repository links to create",
+    )
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "repository_id": self.repository_id[:64],
+            "name": self.name[:120],
+            "source": self.source,
+            "owner": self.owner,
+            "repo": self.repo,
+            "path": self.path[:200],
+            "ref": self.ref,
+            "depth": self.depth,
+            "relationship_count": len(self.relationships),
+        }
+
+
 # ── Phase 19A: Organization Metadata ────────────────────────────
 
 
@@ -645,6 +720,8 @@ __all__ = [
     "NodeHistory",
     "RepositoryNamespace",
     "CrossRepositoryEdge",
+    "CrossRepositoryLinkSpec",
+    "MultiRepoAcquisitionSpec",
     "OrganizationMetadata",
     "OrganizationGraphStats",
 ]

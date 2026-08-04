@@ -16,11 +16,15 @@ no live frontend, pure backend + API + WebSocket):
     D. Graph version comparison     — diff_versions change-set feeding the
        frontend graph timeline (added/removed nodes, changed edges,
        per-version breakdown)
-    E. Live WebSocket graph updates — connect WS /api/v1/ws/graph, receive
-       the snapshot, trigger a version increment, receive the live
-       version_incremented broadcast (no page refresh)
-    F. Search/filter performance    — 3000-node synthetic graph; bounded
-       query + neighborhood latency and result caps
+     E. Live WebSocket graph updates — connect WS /api/v1/ws/graph, receive
+        the snapshot, trigger a version increment, receive the live
+        version_incremented broadcast (no page refresh)
+     F. Search/filter performance    — 3000-node synthetic graph; bounded
+        query + neighborhood latency and result caps
+     G. Multi-repo acquisition → org graph — real filesystem repos acquired,
+        registered + linked into the OrganizationKnowledgeGraphService, then
+        org-scope query merge + cross-repository traversal across the declared
+        bridge (deterministic, no LLM, no network: `source=local`)
 
 Usage:
     python scripts/demo_phase19c.py            # in-memory (deterministic)
@@ -34,8 +38,11 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -423,6 +430,101 @@ async def demo_f(graph) -> dict:
     }
 
 
+def _write_local_repo(root, rid: str, files: dict) -> str:
+    """Create a tiny on-disk repository for a deterministic acquisition demo."""
+    d = Path(root) / rid
+    d.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        (d / rel).parent.mkdir(parents=True, exist_ok=True)
+        (d / rel).write_text(content)
+    return str(d)
+
+
+async def demo_g(graph) -> dict:
+    """G. Multi-repo remote acquisition → organization graph (Phase 19C).
+
+    Exercises the missing acquisition wiring end-to-end, fully deterministically
+    and offline: builds two tiny local repositories on disk, acquires + links
+    them into the OrganizationKnowledgeGraphService (real filesystem evidence
+    seeded, no LLM, no network), then verifies the org-scope query merges the
+    repositories and a cross-repository traversal crosses the declared bridge.
+    """
+    from app.services.organization_graph_service import (
+        OrganizationKnowledgeGraphService,
+        _repo_node_id,
+    )
+    from app.models.engineering_graph import (
+        MultiRepoAcquisitionSpec,
+        QueryScope,
+    )
+
+    tmp_root = tempfile.mkdtemp(prefix="p19c-demo-g-")
+    try:
+        api_path = _write_local_repo(
+            tmp_root, "demo-g-api", {"src/api.py": "def get(): ...", "README.md": "# api"}
+        )
+        web_path = _write_local_repo(
+            tmp_root, "demo-g-web", {"src/web.py": "import api", "index.html": "<html/>"}
+        )
+
+        specs = [
+            MultiRepoAcquisitionSpec(
+                repository_id="demo-g-api", name="Demo G API", source="local",
+                path=api_path,
+            ),
+            MultiRepoAcquisitionSpec(
+                repository_id="demo-g-web", name="Demo G Web", source="local",
+                path=web_path,
+                relationships=[{
+                    "target_repository_id": "demo-g-api",
+                    "relationship": "imports_package",
+                    "weight": 0.9,
+                }],
+            ),
+        ]
+
+        org = OrganizationKnowledgeGraphService(database_url=_db_url() or None)
+        result = await org.acquire_and_link_repositories(specs, ingest=True)
+        assert result["repositories_acquired"] == 2
+        assert result["relationships"] == 1
+        assert result["ingested_files"] > 0, "expected filesystem evidence seeded"
+        acquired_ids = {ns["repository_id"] for ns in result["namespaces"]}
+
+        # Org-scope query must merge both repositories.
+        q = await org.query("file", scope=QueryScope.ORGANIZATION, limit=25)
+        assert acquired_ids == {"demo-g-api", "demo-g-web"}
+        assert set(q.repositories) >= {"demo-g-api", "demo-g-web"}, (
+            f"org query did not merge repos: {q.repositories}"
+        )
+        assert q.total_nodes > 0
+
+        # Cross-repository traversal from the web repo must cross the bridge
+        # the acquisition declared (web -> api) without leaking beyond it.
+        traversal = org.cross_repository_traversal(
+            _repo_node_id("demo-g-web"), depth=2, max_nodes=200,
+        )
+        traversed_repos = {n.repository_id for n in traversal.nodes}
+        assert "demo-g-api" in traversed_repos, (
+            f"acquisition bridge did not cross into demo-g-api: {traversed_repos}"
+        )
+
+        await org.dispose()
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return {
+        "repos_acquired": result["repositories_acquired"],
+        "cross_edges": result["relationships"],
+        "evidence_files_seeded": result["ingested_files"],
+        "org_scope_repos": sorted(q.repositories),
+        "traversal_crossed_into": sorted(
+            r for r in traversed_repos if r in {"demo-g-api", "demo-g-web"}
+        ),
+        "scope": "organization",
+        "persistence": "postgresql" if _is_pg_configured() else "in-memory",
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 19C graph viz demo")
     parser.add_argument("--pg", action="store_true",
@@ -441,6 +543,7 @@ async def main() -> None:
         ("D_version_comparison", demo_d),
         ("E_live_websocket_updates", demo_e),
         ("F_search_filter_performance", demo_f),
+        ("G_multi_repo_acquisition", demo_g),
     ]:
         try:
             results[name] = await fn(graph)

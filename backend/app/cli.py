@@ -284,7 +284,7 @@ def main() -> None:
             run_graph_neighborhood, run_graph_version,
             run_graph_org_stats, run_graph_org_repositories,
             run_graph_org_cross_edges, run_graph_org_query,
-            run_graph_org_traversal,
+            run_graph_org_traversal, run_graph_org_acquire_multi,
         )
         if args.graph_command == "query":
             asyncio.run(run_graph_query(args.query, args.limit, args.json))
@@ -309,6 +309,9 @@ def main() -> None:
         elif args.graph_command == "org-traversal":
             asyncio.run(run_graph_org_traversal(
                 args.node_id, args.depth, args.max_nodes, args.json))
+        elif args.graph_command == "org-acquire-multi":
+            asyncio.run(run_graph_org_acquire_multi(
+                args.manifest, args.ingest, args.json))
         else:
             from app.cli_engineering_graph import add_cli_commands
             tmp = argparse.ArgumentParser()

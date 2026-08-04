@@ -101,6 +101,24 @@ export default function OrganizationGraphPage() {
     weight: 0.8,
   });
 
+  // Phase 19C — multi-repo acquisition manifest.
+  const [manifestText, setManifestText] = useState(
+    JSON.stringify(
+      [
+        {
+          repository_id: "repo-a",
+          name: "repo-a",
+          source: "local",
+          path: "/path/to/repo-a",
+        },
+      ],
+      null,
+      2
+    )
+  );
+  const [acquireBusy, setAcquireBusy] = useState(false);
+  const [acquireNote, setAcquireNote] = useState<string | null>(null);
+
   const loadOrg = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -281,6 +299,39 @@ export default function OrganizationGraphPage() {
       }
     },
     [linkForm, loadOrg]
+  );
+
+  const acquireRepos = useCallback(
+    async (ev: React.FormEvent) => {
+      ev.preventDefault();
+      let repos;
+      try {
+        repos = JSON.parse(manifestText);
+      } catch {
+        setError("Acquisition manifest is not valid JSON");
+        return;
+      }
+      if (!Array.isArray(repos) || repos.length === 0) {
+        setError("Manifest must be a non-empty JSON array of repository specs");
+        return;
+      }
+      setError(null);
+      setAcquireNote(null);
+      setAcquireBusy(true);
+      try {
+        const res = await orgGraphApi.acquireMulti({ repositories: repos });
+        setAcquireNote(
+          `Acquired ${res.repositories_acquired} repo(s), ${res.relationships} ` +
+            `cross-edge(s), ${res.ingested_files} evidence file(s)`
+        );
+        await loadOrg();
+      } catch (e: any) {
+        setError(e?.message || "Acquisition failed");
+      } finally {
+        setAcquireBusy(false);
+      }
+    },
+    [manifestText, loadOrg]
   );
 
   // ── Inspector data ───────────────────────────────────────────
@@ -599,6 +650,47 @@ export default function OrganizationGraphPage() {
                 className={`${btnPrimary} w-full`}
               >
                 Link
+              </button>
+            </form>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+            <h2 className="text-base font-semibold text-slate-900 dark:text-white mb-3">
+              Acquire + Link (Phase 19C)
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+              Materialize several repositories and wire their cross-repository
+              edges in one deterministic, evidence-only pass. Specs are a JSON
+              array of{" "}
+              <code className="font-mono">{"{repository_id, source, path}"}</code>{" "}
+              objects; use{" "}
+              <code className="font-mono">source: "local"</code> for existing
+              checkouts (offline) or{" "}
+              <code className="font-mono">source: "github"</code> with{" "}
+              <code className="font-mono">owner</code>/<code className="font-mono">repo</code>.
+            </p>
+            <form onSubmit={acquireRepos} className="space-y-3">
+              <div>
+                <label className={labelCls}>manifest (JSON)</label>
+                <textarea
+                  value={manifestText}
+                  onChange={(e) => setManifestText(e.target.value)}
+                  spellCheck={false}
+                  rows={7}
+                  className={`${inputCls} font-mono text-xs`}
+                />
+              </div>
+              {acquireNote && (
+                <div className="text-xs text-emerald-600 dark:text-emerald-400">
+                  {acquireNote}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={acquireBusy || !manifestText.trim()}
+                className={`${btnPrimary} w-full`}
+              >
+                {acquireBusy ? "Acquiring…" : "Acquire"}
               </button>
             </form>
           </div>

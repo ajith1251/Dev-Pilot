@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { graphApi } from "@/lib/api/engineeringGraph";
+import { orgGraphApi } from "@/lib/api/organizationGraph";
+import type {
+  OrgAcquireMultiResult,
+  OrgCrossEdge,
+  OrgRepository,
+  OrgStats,
+} from "@/lib/api/organizationGraph";
 import type {
   GraphDiff,
   GraphEdge,
@@ -275,6 +282,341 @@ function RelRow({ rel, onSelect }: { rel: string; onSelect?: () => void }) {
   );
 }
 
+// ── Organization (cross-repository) panel — Phase 19A/19C ──────
+
+function OrgPanel({
+  orgStats,
+  orgRepos,
+  orgCrossEdges,
+  orgLoading,
+  orgError,
+  onRefresh,
+  onAcquired,
+}: {
+  orgStats: OrgStats | null;
+  orgRepos: OrgRepository[];
+  orgCrossEdges: OrgCrossEdge[];
+  orgLoading: boolean;
+  orgError: string | null;
+  onRefresh: () => void;
+  onAcquired: (res: OrgAcquireMultiResult) => void;
+}) {
+  const [registerRepoId, setRegisterRepoId] = useState("");
+  const [registerName, setRegisterName] = useState("");
+  const [registerPath, setRegisterPath] = useState("");
+  const [linkSource, setLinkSource] = useState("");
+  const [linkTarget, setLinkTarget] = useState("");
+  const [linkRel, setLinkRel] = useState("imports_package");
+  const [manifestText, setManifestText] = useState(
+    JSON.stringify(
+      [
+        {
+          repository_id: "repo-a",
+          name: "repo-a",
+          source: "local",
+          path: "/path/to/repo-a",
+        },
+      ],
+      null,
+      2
+    )
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNote, setActionNote] = useState<string | null>(null);
+
+  const clearAction = () => {
+    setActionError(null);
+    setActionNote(null);
+  };
+
+  const handleRegister = async () => {
+    if (!registerRepoId.trim()) {
+      setActionError("repository_id is required");
+      return;
+    }
+    clearAction();
+    setBusy("register");
+    try {
+      await orgGraphApi.registerRepository({
+        repository_id: registerRepoId.trim(),
+        name: registerName.trim() || registerRepoId.trim(),
+        path: registerPath.trim() || undefined,
+        source_type: "local",
+      });
+      setRegisterRepoId("");
+      setRegisterName("");
+      setRegisterPath("");
+      setActionNote(`Registered ${registerRepoId.trim()}`);
+      onRefresh();
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : "Register failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleLink = async () => {
+    if (!linkSource.trim() || !linkTarget.trim() || !linkRel.trim()) {
+      setActionError("source, target and relationship are required");
+      return;
+    }
+    clearAction();
+    setBusy("link");
+    try {
+      await orgGraphApi.link({
+        source_repository_id: linkSource.trim(),
+        target_repository_id: linkTarget.trim(),
+        relationship: linkRel.trim(),
+      });
+      setLinkSource("");
+      setLinkTarget("");
+      setActionNote(`Linked ${linkSource.trim()} → ${linkTarget.trim()}`);
+      onRefresh();
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : "Link failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleAcquire = async () => {
+    let repos;
+    try {
+      repos = JSON.parse(manifestText);
+    } catch {
+      setActionError("manifest is not valid JSON");
+      return;
+    }
+    if (!Array.isArray(repos) || repos.length === 0) {
+      setActionError("manifest must be a non-empty array of repository specs");
+      return;
+    }
+    clearAction();
+    setBusy("acquire");
+    try {
+      const res = await orgGraphApi.acquireMulti({ repositories: repos });
+      setActionNote(
+        `Acquired ${res.repositories_acquired} repo(s), ${res.relationships} cross-edge(s), ` +
+          `${res.ingested_files} evidence file(s)`
+      );
+      onAcquired(res);
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : "Acquire failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+          Organization graph
+        </h2>
+        <div className="flex items-center gap-2">
+          {orgLoading && (
+            <span className="text-[11px] text-slate-400">loading…</span>
+          )}
+          <button
+            onClick={onRefresh}
+            disabled={orgLoading}
+            className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {orgError && (
+        <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">{orgError}</p>
+      )}
+      {actionError && (
+        <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">{actionError}</p>
+      )}
+      {actionNote && (
+        <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{actionNote}</p>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <div className="rounded-lg bg-slate-50 dark:bg-slate-900 px-3 py-2">
+          <div className="text-slate-400">Repositories</div>
+          <div className="font-mono text-lg text-slate-900 dark:text-white">
+            {orgStats?.repository_count ?? "—"}
+          </div>
+        </div>
+        <div className="rounded-lg bg-slate-50 dark:bg-slate-900 px-3 py-2">
+          <div className="text-slate-400">Cross-edges</div>
+          <div className="font-mono text-lg text-slate-900 dark:text-white">
+            {orgStats?.cross_edge_count ?? "—"}
+          </div>
+        </div>
+        <div className="rounded-lg bg-slate-50 dark:bg-slate-900 px-3 py-2">
+          <div className="text-slate-400">Namespace nodes</div>
+          <div className="font-mono text-lg text-slate-900 dark:text-white">
+            {orgStats?.node_count ?? "—"}
+          </div>
+        </div>
+        <div className="rounded-lg bg-slate-50 dark:bg-slate-900 px-3 py-2">
+          <div className="text-slate-400">Last updated</div>
+          <div className="font-mono text-[11px] text-slate-900 dark:text-white truncate">
+            {orgStats ? new Date(orgStats.last_updated).toLocaleString() : "—"}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid lg:grid-cols-2 gap-4">
+        <div>
+          <h3 className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            Registered repositories
+          </h3>
+          {orgRepos.length === 0 ? (
+            <p className="mt-1 text-[11px] text-slate-400">
+              None registered yet — register one or acquire from a manifest.
+            </p>
+          ) : (
+            <ul className="mt-1 space-y-1">
+              {orgRepos.map((r) => (
+                <li
+                  key={r.repository_id}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs"
+                >
+                  <span className="font-mono text-slate-800 dark:text-slate-200">
+                    {truncate(r.repository_id, 28)}
+                  </span>
+                  <span className="text-[10px] text-slate-400">{r.source_type}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
+            <div className="flex items-center gap-2">
+              <input
+                value={registerRepoId}
+                onChange={(e) => setRegisterRepoId(e.target.value)}
+                placeholder="repository_id"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <input
+                value={registerName}
+                onChange={(e) => setRegisterName(e.target.value)}
+                placeholder="name"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                value={registerPath}
+                onChange={(e) => setRegisterPath(e.target.value)}
+                placeholder="path (local checkout)"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <button
+                onClick={handleRegister}
+                disabled={busy === "register"}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-primary-600 text-white text-xs font-medium hover:bg-primary-700 disabled:opacity-50"
+              >
+                {busy === "register" ? "…" : "Register"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            Cross-repository edges
+          </h3>
+          {orgCrossEdges.length === 0 ? (
+            <p className="mt-1 text-[11px] text-slate-400">No cross-edges yet.</p>
+          ) : (
+            <ul className="mt-1 space-y-1">
+              {orgCrossEdges.map((e) => (
+                <li
+                  key={e.edge_id}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs"
+                >
+                  <span className="font-mono text-slate-800 dark:text-slate-200">
+                    {truncate(e.source_repository_id, 14)} →{" "}
+                    {truncate(e.target_repository_id, 14)}
+                  </span>
+                  <RelRow rel={e.relationship} />
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={linkSource}
+                onChange={(e) => setLinkSource(e.target.value)}
+                placeholder="source repo id"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <span className="text-[10px] text-slate-400">→</span>
+              <input
+                value={linkTarget}
+                onChange={(e) => setLinkTarget(e.target.value)}
+                placeholder="target repo id"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                value={linkRel}
+                onChange={(e) => setLinkRel(e.target.value)}
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+              >
+                <option value="imports_package">imports_package</option>
+                <option value="shares_library">shares_library</option>
+                <option value="depends_on_repository">depends_on_repository</option>
+              </select>
+              <button
+                onClick={handleLink}
+                disabled={busy === "link"}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-primary-600 text-white text-xs font-medium hover:bg-primary-700 disabled:opacity-50"
+              >
+                {busy === "link" ? "…" : "Link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
+        <h3 className="text-xs font-medium text-slate-500 dark:text-slate-400">
+          Acquire + link from manifest (Phase 19C)
+        </h3>
+        <textarea
+          value={manifestText}
+          onChange={(e) => setManifestText(e.target.value)}
+          spellCheck={false}
+          rows={5}
+          className="mt-2 w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary-500"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-[11px] text-slate-400">
+            Manifest: JSON array of repository specs with{" "}
+            <code className="font-mono">repository_id</code>,{" "}
+            <code className="font-mono">source</code> ("local" | "github"), and{" "}
+            <code className="font-mono">path</code> /{" "}
+            <code className="font-mono">owner:repo</code>. Local sources are
+            deterministic and offline.
+          </span>
+          <button
+            onClick={handleAcquire}
+            disabled={busy === "acquire"}
+            className="ml-auto shrink-0 px-3 py-1.5 rounded-lg bg-primary-600 text-white text-xs font-medium hover:bg-primary-700 disabled:opacity-50"
+          >
+            {busy === "acquire" ? "…" : "Acquire"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────
 
 export default function EngineeringGraphPage() {
@@ -326,6 +668,14 @@ export default function EngineeringGraphPage() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
 
+  // Phase 19C — Organization (cross-repository) graph mode (§19A).
+  const [graphMode, setGraphMode] = useState<"kbg" | "org">("kbg");
+  const [orgStats, setOrgStats] = useState<OrgStats | null>(null);
+  const [orgRepos, setOrgRepos] = useState<OrgRepository[]>([]);
+  const [orgCrossEdges, setOrgCrossEdges] = useState<OrgCrossEdge[]>([]);
+  const [orgLoading, setOrgLoading] = useState(false);
+  const [orgError, setOrgError] = useState<string | null>(null);
+
   const detailRef = useRef<HTMLDivElement>(null);
 
   const selectedNode = useMemo(() => {
@@ -346,9 +696,30 @@ export default function EngineeringGraphPage() {
     }
   }, []);
 
+  const loadOrg = useCallback(async () => {
+    if (graphMode !== "org") return;
+    setOrgLoading(true);
+    setOrgError(null);
+    try {
+      const [st, repos, edges] = await Promise.all([
+        orgGraphApi.stats(),
+        orgGraphApi.repositories(),
+        orgGraphApi.crossEdges(),
+      ]);
+      setOrgStats(st);
+      setOrgRepos(repos);
+      setOrgCrossEdges(edges);
+    } catch (e: unknown) {
+      setOrgError(e instanceof Error ? e.message : "Org load failed");
+    } finally {
+      setOrgLoading(false);
+    }
+  }, [graphMode]);
+
   useEffect(() => {
     void loadVersion();
-  }, [loadVersion]);
+    void loadOrg();
+  }, [loadVersion, loadOrg]);
 
   const loadDetail = useCallback(async (id: string) => {
     setNodeLoading(true);
@@ -398,7 +769,16 @@ export default function EngineeringGraphPage() {
       setVizLoading(true);
       setVizError(null);
       try {
-        const res = await graphApi.neighborhood(id, useDepth, 60);
+        let res;
+        if (graphMode === "org") {
+          const t = await orgGraphApi.traversal(id, {
+            depth: useDepth,
+            maxNodes: 250,
+          });
+          res = t;
+        } else {
+          res = await graphApi.neighborhood(id, useDepth, 60);
+        }
         setRootId((prev) => prev ?? id);
         const merged = mergeGraph(graph, {
           nodes: res.nodes.map(nodeToViz),
@@ -417,7 +797,7 @@ export default function EngineeringGraphPage() {
         setVizLoading(false);
       }
     },
-    [depth, graph, loadDetail]
+    [depth, graph, graphMode, loadDetail]
   );
 
   const removeNode = useCallback((id: string) => {
@@ -445,7 +825,15 @@ export default function EngineeringGraphPage() {
       setLoading(true);
       setQueryError(null);
       try {
-        const res = await graphApi.query(q);
+        let res;
+        if (graphMode === "org") {
+          res = await orgGraphApi.query(q, {
+            scope: "organization",
+            limit: 25,
+          });
+        } else {
+          res = await graphApi.query(q);
+        }
         setResults(res);
         if (res.nodes.length) {
           setGraph((prev) =>
@@ -463,8 +851,12 @@ export default function EngineeringGraphPage() {
         setLoading(false);
       }
     },
-    [query]
+    [query, graphMode]
   );
+
+  const refreshOrg = useCallback(() => {
+    void loadOrg();
+  }, [loadOrg]);
 
   // ── Live updates (§10): apply version increments without reload ──
 
@@ -702,8 +1094,56 @@ export default function EngineeringGraphPage() {
       </div>
 
       {/* Toolbar: search + filters + actions */}
+      {graphMode === "org" && (
+        <OrgPanel
+          orgStats={orgStats}
+          orgRepos={orgRepos}
+          orgCrossEdges={orgCrossEdges}
+          orgLoading={orgLoading}
+          orgError={orgError}
+          onRefresh={refreshOrg}
+          onAcquired={(res) => {
+            setOrgStats((prev) =>
+              prev
+                ? { ...prev, repository_count: res.repositories_acquired }
+                : prev
+            );
+            void refreshOrg();
+          }}
+        />
+      )}
       <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4">
         <div className="flex flex-wrap items-center gap-2">
+          <div
+            role="group"
+            aria-label="Graph scope"
+            className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 p-0.5"
+          >
+            <button
+              type="button"
+              onClick={() => setGraphMode("kbg")}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                graphMode === "kbg"
+                  ? "bg-primary-600 text-white"
+                  : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+              }`}
+              title="Single-repository knowledge graph"
+            >
+              KBG
+            </button>
+            <button
+              type="button"
+              onClick={() => setGraphMode("org")}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                graphMode === "org"
+                  ? "bg-primary-600 text-white"
+                  : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+              }`}
+              title="Organization (cross-repository) graph"
+            >
+              Org
+            </button>
+          </div>
           <input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}

@@ -162,4 +162,57 @@ export const orgGraphApi = {
     );
     return res.data.cross_edge;
   },
+
+  /**
+   * Acquire + link multiple repositories into the organization graph
+   * (Phase 19C). Takes a flat manifest of repository specs; each spec may
+   * declare explicit cross-repository relationships. `source` may be "local"
+   * (deterministic path-based ingest) or "github" (requires an injected
+   * acquisition service on the server).
+   */
+  async acquireMulti(payload: {
+    repositories: Array<{
+      repository_id: string;
+      name?: string;
+      source?: "local" | "github";
+      owner?: string;
+      repo?: string;
+      path?: string;
+      ref?: string;
+      depth?: number;
+      relationships?: Array<{
+        target_repository_id: string;
+        relationship: string;
+        weight?: number;
+      }>;
+    }>;
+    ingest?: boolean;
+  }): Promise<OrgAcquireMultiResult> {
+    if (!payload.repositories || payload.repositories.length === 0) {
+      throw new Error("acquireMulti requires at least one repository spec");
+    }
+    const res = await request<{ success: boolean; data: OrgAcquireMultiResult }>(
+      `/api/v1/graph/org/acquire-multi`,
+      { method: "POST", body: JSON.stringify(payload.repositories) }
+    );
+    return res.data;
+  },
 };
+
+export interface OrgAcquireMultiResult {
+  organization_id: string;
+  repositories_acquired: number;
+  namespaces: Array<{
+    repository_id: string;
+    namespace_id: string;
+    organization_id: string;
+    name: string;
+    path: string;
+    source_type: string;
+  }>;
+  cross_edges: OrgCrossEdge[];
+  relationships: number;
+  ingested_files: number;
+  persisted_records: number;
+  scope: string;
+}

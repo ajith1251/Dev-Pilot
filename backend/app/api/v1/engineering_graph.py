@@ -25,6 +25,7 @@ from app.models.engineering_graph import (
     MAX_EXPLAIN_EVIDENCE,
     MAX_NEIGHBORHOOD_NODES,
     MAX_QUERY_RESULTS,
+    MAX_REPOSITORIES_PER_ORG,
 )
 
 router = APIRouter(prefix="/api/v1/graph", tags=["engineering-graph"])
@@ -452,6 +453,42 @@ async def org_graph_link(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"success": True, "data": {"cross_edge": edge.summary()}}
     except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/org/acquire-multi", response_model=Response)
+async def org_graph_acquire_multi(payload: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Acquire multiple repositories and wire them into the organization graph.
+
+    Manifest: a list of repository specs (Phase 19C). ``source=local`` uses an
+    existing checkout at ``path`` (deterministic, no network); ``source=github``
+    clones via the acquisition service. Each spec may declare explicit
+    cross-repository relationships to link once registered.
+
+    Evidence-only: only repository namespaces, declared links, and filesystem
+    evidence nodes are surfaced — never chain-of-thought or credentials.
+    """
+    try:
+        if not payload or len(payload) > MAX_REPOSITORIES_PER_ORG:
+            raise HTTPException(
+                status_code=400,
+                detail=f"manifest must contain 1..{MAX_REPOSITORIES_PER_ORG} repositories",
+            )
+        from app.models.engineering_graph import MultiRepoAcquisitionSpec
+
+        specs = [MultiRepoAcquisitionSpec(**s) for s in payload]
+        from app.services.acquisition import RepositoryAcquisitionService
+
+        org = _get_org_service()
+        result = await org.acquire_and_link_repositories(
+            specs, acquisition_service=RepositoryAcquisitionService(),
+        )
+        return {"success": True, "data": result}
+    except HTTPException:
+        raise
+    except (ValueError, KeyError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
