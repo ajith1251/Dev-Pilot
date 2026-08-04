@@ -522,8 +522,9 @@ llm_factory.get_provider()  ──►  RoutedProvider facade (agents unchanged)
 | 16 | Autonomous Execution (goal tracking, dynamic replanning, safe termination) | ✅ Complete |
 | 17 | Collaborative Reasoning & Evidence Consensus | ✅ Complete |
 | 18 | Engineering Knowledge Graph (EKG) | ✅ Complete |
-| 19 | Semantic EKG Retrieval + EKG-driven test selection | 🟡 Partial (retrieval + test selection done) |
+| 19 | Semantic EKG Retrieval + EKG-driven test selection | ✅ Complete |
 | 19B | Multi-Provider Failover & Reliability Platform | ✅ Complete |
-| 19C | Cross-repo knowledge namespaces + force-directed graph viz | ⏳ Future |
+| 19C | Cross-repo namespaces + interactive EKG viz + multi-repo acquisition + org-scope queries | ✅ Complete |
+| 20 | Cross-Repository Autonomous Engineering & Production Readiness | ⏳ Proposed (see `workflow-status/PHASE20_ROADMAP.md`) |
 
 
