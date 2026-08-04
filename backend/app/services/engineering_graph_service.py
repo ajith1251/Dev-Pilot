@@ -954,6 +954,17 @@ class EngineeringKnowledgeGraphService:
         by the impact edges the EKG already persists for every ingested
         run.
 
+        Selection is scoped to the most recent run per changed file: only
+        the newest TEST_SUITE that validated a patch touching the file
+        contributes its `test_files`. Recency is the suite's `graph_version`
+        first (a global monotonic counter bumped per ingested run and
+        updated on re-ingest), then `created_at`, then `node_id` as a stable
+        tiebreaker. This keeps the result deterministic against an
+        accumulated database — historical suites from older runs touching
+        the same path no longer bleed stale test files into the current
+        selection, and re-ingested runs are recognized as current even
+        though `created_at` is preserved from first ingestion.
+
         Returns [] when no evidence exists (graceful degradation, never
         raises) — the same pattern as the rest of the codebase.
         """
@@ -969,29 +980,62 @@ class EngineeringKnowledgeGraphService:
                 if n.node_type == EKNodeType.FILE
                 and (n.source_ref in wanted or n.qualified_name in wanted)
             ]
-            # 2. PATCH nodes that MODIFIES those files (reverse edge).
-            patch_ids: Set[str] = set()
+            # Group FILE nodes by the changed path they match.
+            by_path: Dict[str, List[EKNode]] = {}
             for fnode in file_nodes:
-                for edge in self.get_reverse_edges(fnode.node_id):
-                    if edge.relationship != EKRelationshipType.MODIFIES:
-                        continue
-                    src = self._nodes.get(edge.source_id)
-                    if src is not None and src.node_type == EKNodeType.PATCH:
-                        patch_ids.add(edge.source_id)
-            # 3. TEST_SUITE nodes VALIDATED_BY those patches → test files.
-            for pid in patch_ids:
-                for edge in self.get_edges(pid):
-                    if edge.relationship != EKRelationshipType.VALIDATED_BY:
-                        continue
-                    suite = self._nodes.get(edge.target_id)
-                    if suite is None or suite.node_type != EKNodeType.TEST_SUITE:
-                        continue
-                    for tf in (suite.payload or {}).get("test_files", []) or []:
-                        if isinstance(tf, str) and tf and tf not in seen:
-                            seen.add(tf)
-                            selected.append(tf)
-                            if len(selected) >= limit:
-                                return selected
+                key = fnode.source_ref if fnode.source_ref in wanted else fnode.qualified_name
+                by_path.setdefault(key, []).append(fnode)
+
+            for path in wanted:
+                if path not in by_path:
+                    continue
+                # 2. PATCH nodes that MODIFIES those files (reverse edge).
+                #    Iterate the raw reverse index directly — a shared FILE
+                #    node accumulates a MODIFIES edge per run, and the public
+                #    `get_reverse_edges` caps at MAX_EDGES_PER_NODE, which can
+                #    hide the newest run's patch behind older history.
+                patch_ids: Set[str] = set()
+                for fnode in by_path[path]:
+                    for sid, edges in self._reverse.get(fnode.node_id, {}).items():
+                        if any(
+                            e.relationship == EKRelationshipType.MODIFIES
+                            for e in edges
+                        ):
+                            src = self._nodes.get(sid)
+                            if src is not None and src.node_type == EKNodeType.PATCH:
+                                patch_ids.add(sid)
+                # 3. TEST_SUITE nodes VALIDATED_BY those patches. Scope to
+                #    the newest suite for this path so older runs' suites do
+                #    not bleed stale test files into the selection.
+                newest_suite: Optional[EKNode] = None
+                for pid in patch_ids:
+                    for tid, edges in self._edges.get(pid, {}).items():
+                        if not any(
+                            e.relationship == EKRelationshipType.VALIDATED_BY
+                            for e in edges
+                        ):
+                            continue
+                        suite = self._nodes.get(tid)
+                        if suite is None or suite.node_type != EKNodeType.TEST_SUITE:
+                            continue
+                        if newest_suite is None or (
+                            suite.graph_version,
+                            suite.created_at,
+                            suite.node_id,
+                        ) > (
+                            newest_suite.graph_version,
+                            newest_suite.created_at,
+                            newest_suite.node_id,
+                        ):
+                            newest_suite = suite
+                if newest_suite is None:
+                    continue
+                for tf in (newest_suite.payload or {}).get("test_files", []) or []:
+                    if isinstance(tf, str) and tf and tf not in seen:
+                        seen.add(tf)
+                        selected.append(tf)
+                        if len(selected) >= limit:
+                            return selected
         except Exception as exc:
             logger.debug("EKG impact-edge test selection unavailable: %s", exc)
         return selected

@@ -937,6 +937,51 @@ class TestImpactEdgeTestSelection:
         assert "auth/tests/test_auth.py" in selected
         assert "tests/test_session.py" in selected
 
+    def test_newest_run_suite_wins_over_stale_historical_bleed(self):
+        """Regression: with accumulated graph state, only the NEWEST run's
+        suite touching a changed file contributes test files — stale files
+        recorded by an older run touching the same path must not bleed into
+        the selection (demo H against an accumulated PG)."""
+        g = make_service()
+        # Older run touching auth/service.py carries a stale, now-removed test.
+        build_impact_evidence(g, run_id="RUN-STALE")
+        stale_suite = g.find_nodes(node_type=EKNodeType.TEST_SUITE)[0]
+        stale_suite.payload = {
+            **stale_suite.payload,
+            "test_files": ["auth/tests/test_stale.py", "tests/test_removed.py"],
+        }
+        # Newer run touching the same file carries the authoritative tests.
+        build_impact_evidence(g, run_id="RUN-CURRENT")
+        selected = g.select_tests_for_changes(["auth/service.py"])
+        assert "auth/tests/test_auth.py" in selected
+        assert "tests/test_session.py" in selected
+        assert "tests/test_removed.py" not in selected
+        assert "auth/tests/test_stale.py" not in selected
+
+    def test_reingested_run_wins_despite_older_created_at(self):
+        """Regression (demo H vs accumulated PG): recency keys on
+        graph_version, not created_at. add_node preserves created_at across
+        re-ingest, so a suite re-ingested by a later run keeps an older
+        created_at but gains a higher graph_version — it must win over a
+        suite created later (which may carry empty/blank test_files)."""
+        g = make_service()
+        # Original run touching auth/service.py carries the authoritative tests.
+        build_impact_evidence(g, run_id="RUN-REINGEST")
+        # Later runs bump the graph version without touching this file.
+        for i in range(5):
+            g._version += 1
+            add_run(g, f"RUN-FILLER-{i}")
+        # A later run touches the same file but recorded no test files; by
+        # created_at it would look newest, but its graph_version is lower.
+        later = build_impact_evidence(g, run_id="RUN-LATER-EMPTY")
+        later["tests"].payload = {**later["tests"].payload, "test_files": []}
+        # Re-ingest the original run at the current (highest) version.
+        g._version += 1
+        build_impact_evidence(g, run_id="RUN-REINGEST")
+        selected = g.select_tests_for_changes(["auth/service.py"])
+        assert "auth/tests/test_auth.py" in selected
+        assert "tests/test_session.py" in selected
+
     def test_unknown_changed_files_return_empty(self):
         g = make_service()
         build_impact_evidence(g)
