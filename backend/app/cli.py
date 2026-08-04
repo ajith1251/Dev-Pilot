@@ -142,6 +142,12 @@ def main() -> None:
     run_parser.add_argument("--task", type=str, required=True, help="Task title")
     run_parser.add_argument("--description", type=str, default="", help="Task description")
     run_parser.add_argument("--json", action="store_true", help="Output structured JSON result")
+    run_parser.add_argument(
+        "--aux-repo", type=str, action="append", default=[],
+        metavar="ID=PATH",
+        help="Auxiliary repository (Phase 20) as repository_id=local_path; "
+             "repeatable. Materialized + linked via the org graph.",
+    )
 
     # ── Phase 11H: Verification commands ──────────────────────────
     vp_parser = subparsers.add_parser(
@@ -216,7 +222,7 @@ def main() -> None:
     elif args.command == "verify":
         asyncio.run(run_verify())
     elif args.command == "run":
-        asyncio.run(run_orchestration(repo=args.repo, task=args.task, description=args.description, json_output=args.json))
+        asyncio.run(run_orchestration(repo=args.repo, task=args.task, description=args.description, json_output=args.json, aux_repo=args.aux_repo))
     elif args.command == "code-index":
         from app.cli_code_intelligence import run_code_index
         run_code_index(args.path, args.verbose)
@@ -843,14 +849,28 @@ async def run_verify() -> None:
         sys.exit(1)
 
 
-async def run_orchestration(repo: str, task: str, description: str = "", json_output: bool = False) -> None:
-    """Execute end-to-end DevPilot pipeline (Phase 10)."""
+async def run_orchestration(repo: str, task: str, description: str = "", json_output: bool = False, aux_repo=None) -> None:
+    """Execute end-to-end DevPilot pipeline (Phase 10).
+
+    ``aux_repo`` accepts ``repository_id=local_path`` entries that become
+    auxiliary repositories materialized + linked via the org graph (Phase 20).
+    """
     from app.services.orchestration_service import OrchestrationService
-    from app.models.orchestration import RunSource, RunSourceType
+    from app.models.orchestration import RepositorySpec, RunSource, RunSourceType
 
     print(f"\n{'='*60}\n  DevPilot Run (Phase 10)\n{'='*60}")
     print(f"  Repository: {repo}")
     print(f"  Task:       {task[:80]}\n{'='*60}\n")
+
+    repositories = None
+    for entry in (aux_repo or []):
+        if "=" not in entry:
+            raise SystemExit(
+                f"--aux-repo must be repository_id=local_path, got: {entry!r}"
+            )
+        aux_id, aux_path = entry.split("=", 1)
+        repositories = repositories or []
+        repositories.append(RepositorySpec(repository_id=aux_id, path=aux_path))
 
     is_github = repo.startswith("https://github.com/") or repo.startswith("github.com/")
     source = RunSource(
@@ -858,6 +878,7 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
         title=task,
         description=description,
         repository_path=repo,
+        repositories=repositories,
     )
 
     orch = OrchestrationService()

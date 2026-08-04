@@ -135,6 +135,9 @@ class EventType(str, Enum):
 
     CANCELLATION_REQUESTED = "cancellation_requested"
 
+    # Phase 20 — multi-repository acquisition events
+    AUXILIARY_REPOSITORIES_ACQUIRED = "auxiliary_repositories_acquired"
+
 
 class FailureCode(str, Enum):
     """Machine-readable failure codes."""
@@ -234,6 +237,55 @@ TERMINAL_STAGES: set[StageType] = {
 # ── Domain Models ───────────────────────────────────────────────
 
 
+class RepositorySpec(BaseModel):
+    """Specification for an auxiliary repository in a Phase 20 run.
+
+    Mirrors the organization graph's ``MultiRepoAcquisitionSpec`` so a run can
+    materialize + link repositories beyond its primary ``repository_path``.
+
+    ``source`` selects how the repository is materialized:
+
+    - ``local``: use an existing checkout at ``path`` (no network, deterministic).
+    - ``github``: clone via the acquisition service from ``owner/repo`` (requires
+      a network path in production; never executes repository code).
+
+    ``relationships`` declare explicit, deterministic cross-repository edges the
+    acquisition creates from this repository to its declared targets (a list of
+    ``{target_repository_id, relationship, weight}`` objects).
+    """
+
+    repository_id: str = Field(description="Stable namespace for this repository")
+    name: str = Field(default="", max_length=200, description="Display name")
+    source: str = Field(
+        default="local", max_length=16,
+        description="Acquisition source: local | github",
+    )
+    owner: str = Field(default="", max_length=64, description="GitHub owner (github)")
+    repo: str = Field(default="", max_length=64, description="GitHub repo name (github)")
+    path: str = Field(default="", max_length=1024, description="Local checkout path (local)")
+    ref: str = Field(default="", max_length=64, description="Git ref (github, default HEAD)")
+    depth: int = Field(default=1, ge=1, le=64, description="Shallow clone depth (github)")
+    relationships: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Explicit cross-repository links "
+                    "(target_repository_id, relationship, weight)",
+    )
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "repository_id": self.repository_id[:64],
+            "name": self.name[:120],
+            "source": self.source,
+            "owner": self.owner[:64],
+            "repo": self.repo[:64],
+            "path": self.path[:200],
+            "ref": self.ref[:64],
+            "relationships": [
+                r.get("target_repository_id", "")[:64] for r in self.relationships[:10]
+            ],
+        }
+
+
 class RunSource(BaseModel):
     """Source information for a DevPilot run."""
 
@@ -241,6 +293,11 @@ class RunSource(BaseModel):
     title: str = Field(description="Task / issue title")
     description: str = Field(default="", description="Full description")
     repository_path: Optional[str] = Field(default=None, description="Local path or remote URL")
+    repositories: Optional[List[RepositorySpec]] = Field(
+        default=None,
+        description="Auxiliary repositories materialized via the org graph "
+                    "(Phase 20); the primary repo is `repository_path`",
+    )
     issue_number: Optional[int] = Field(default=None, description="GitHub issue number")
     issue_url: Optional[str] = Field(default=None, description="GitHub issue URL")
 
@@ -294,6 +351,11 @@ class DevPilotRun(BaseModel):
 
     # Context — built up as stages complete
     repository_path: Optional[str] = Field(default=None)
+    auxiliary_repositories: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Namespaces materialized for the run's auxiliary "
+                    "repositories (Phase 20)",
+    )
     repository_profile: Optional[RepositoryProfile] = Field(default=None)
     requirements: Optional[StructuredRequirements] = Field(default=None)
     plan: Optional[ImplementationPlan] = Field(default=None)
@@ -327,6 +389,10 @@ class DevPilotRunResult(BaseModel):
 
     source: RunSource = Field(description="Original task/issue")
     repository: Optional[str] = Field(default=None)
+    auxiliary_repositories: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Materialized auxiliary repository namespaces (Phase 20)",
+    )
 
     # Stage summary
     stages: List[Dict[str, Any]] = Field(

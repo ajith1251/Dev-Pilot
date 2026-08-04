@@ -108,6 +108,24 @@ def _get_ws_manager():
     return _ws_manager
 
 
+def _get_org_service():
+    """Lazily instantiate the OrganizationKnowledgeGraphService.
+
+    Used by Phase 20 auxiliary-repository materialization. Returns None when
+    the import fails so the pipeline degrades gracefully (same pattern as the
+    ContextEngine's org-graph hook).
+    """
+    try:
+        from app.services.organization_graph_service import (
+            OrganizationKnowledgeGraphService,
+        )
+
+        return OrganizationKnowledgeGraphService()
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Organization graph service unavailable", exc_info=True)
+        return None
+
+
 def _workspace_structure(root: str, max_files: int = 300) -> str:
     """Return a compact relative file listing of a workspace.
 
@@ -357,6 +375,15 @@ class OrchestrationService:
                     # analysis (ANALYZING_REPOSITORY → ANALYZING_TASK) is a
                     # valid transition.
                     await self._transition_to(run, StageType.ANALYZING_REPOSITORY)
+
+            # ── Phase 20: auxiliary repositories ───────────────
+            # Materialize + link any auxiliary repositories declared on the
+            # source via the organization graph (deterministic, evidence-only;
+            # the primary repository_path is unaffected). Runs for both the
+            # GitHub and local paths.
+            if run.source.repositories and not run.auxiliary_repositories:
+                if not await self._materialize_auxiliary_repositories(run):
+                    return await self._finalize(run, total_start)
 
             # ── STAGE: Repository Analysis ─────────────────────
             if run.source.repository_path and not run.repository_profile:
@@ -852,6 +879,99 @@ class OrchestrationService:
                 message=str(exc)[:500],
             )
             await self._fail_stage(run, StageType.ACQUIRING_REPOSITORY, str(exc))
+            return False
+
+    async def _materialize_auxiliary_repositories(self, run: DevPilotRun) -> bool:
+        """Phase 20 — materialize + link a run's auxiliary repositories.
+
+        Converts ``run.source.repositories`` (RepositorySpec) into the org
+        graph's ``MultiRepoAcquisitionSpec`` and delegates to
+        ``OrganizationKnowledgeGraphService.acquire_and_link_repositories``.
+
+        Deterministic and evidence-only:
+
+        - ``source=local`` checkouts are registered as namespaces with no
+          network (the deterministic test path);
+        - ``source=github`` repos are shallow-cloned via the org-graph
+          acquisition service (never executed);
+        - only explicitly declared ``relationships`` become cross-repository
+          edges — the org graph is never LLM-inferred from here;
+        - the primary ``repository_path`` is unaffected, and per-repo
+          isolation is preserved because patches/tests only ever touch the
+          primary checkout.
+
+        On success the materialized namespaces are recorded on the run and an
+        ``AUXILIARY_REPOSITORIES_ACQUIRED`` event is emitted. On failure the
+        run is moved to FAILED and False is returned so the caller finalizes.
+        """
+        specs = run.source.repositories or []
+        if not specs:
+            return True
+
+        org = _get_org_service()
+        if org is None:
+            run.failure = RunFailure(
+                stage=StageType.ACQUIRING_REPOSITORY,
+                code=FailureCode.REPOSITORY_ACQUISITION_FAILED,
+                message="Auxiliary repositories requested but the organization "
+                        "graph service is unavailable",
+                recoverable=False,
+            )
+            await self._transition_to(run, StageType.FAILED, RunStatus.FAILED)
+            return False
+
+        try:
+            from app.models.engineering_graph import (
+                CrossRepositoryLinkSpec,
+                MultiRepoAcquisitionSpec,
+            )
+
+            acq_specs = [
+                MultiRepoAcquisitionSpec(
+                    repository_id=spec.repository_id,
+                    name=spec.name or spec.repository_id,
+                    source=spec.source,
+                    owner=spec.owner,
+                    repo=spec.repo,
+                    path=spec.path,
+                    ref=spec.ref,
+                    depth=spec.depth,
+                    relationships=[
+                        CrossRepositoryLinkSpec(
+                            target_repository_id=rel["target_repository_id"],
+                            relationship=rel.get("relationship", "depends_on"),
+                            weight=float(rel.get("weight", 1.0)),
+                        )
+                        for rel in spec.relationships
+                        if rel.get("target_repository_id")
+                    ],
+                )
+                for spec in specs
+            ]
+
+            result = await org.acquire_and_link_repositories(
+                acq_specs, acquisition_service=None, ingest=True,
+            )
+            namespaces = result.get("namespaces", []) or []
+            run.auxiliary_repositories = namespaces
+            registered = [n.get("repository_id", "") for n in namespaces]
+            self._add_event(
+                run,
+                EventType.AUXILIARY_REPOSITORIES_ACQUIRED,
+                f"Materialized auxiliary repositories: {', '.join(registered) or 'none'}",
+                metadata={"repositories": registered},
+            )
+            await self._store.update(run)
+            await self._broadcast_update(run)
+            return True
+        except Exception as exc:
+            run.failure = RunFailure(
+                stage=StageType.ACQUIRING_REPOSITORY,
+                code=FailureCode.REPOSITORY_ACQUISITION_FAILED,
+                message=f"Auxiliary repository materialization failed: {str(exc)[:500]}",
+                recoverable=False,
+            )
+            await self._transition_to(run, StageType.FAILED, RunStatus.FAILED)
             return False
 
     async def _stage_analysis(self, run: DevPilotRun) -> bool:
@@ -1532,6 +1652,7 @@ class OrchestrationService:
             status=run.status,
             source=run.source,
             repository=run.repository_path,
+            auxiliary_repositories=run.auxiliary_repositories,
             stages=[
                 {
                     "stage": s.stage.value,

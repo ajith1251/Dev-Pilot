@@ -15,6 +15,7 @@ from app.models.orchestration import (
     DevPilotRun,
     DevPilotRunResult,
     OrchestrationCapabilities,
+    RepositorySpec,
     RunSource,
     RunSourceType,
 )
@@ -65,13 +66,19 @@ class OrchestrationWorkflow:
         description: str = "",
         repository_path: Optional[str] = None,
         workspace_root: Optional[str] = None,
+        repositories: Optional[List["RepositorySpec"]] = None,
     ) -> DevPilotRunResult:
-        """Run end-to-end pipeline from a user task."""
+        """Run end-to-end pipeline from a user task.
+
+        ``repositories`` optionally declares auxiliary repositories to
+        materialize + link via the org graph (Phase 20).
+        """
         source = RunSource(
             source_type=RunSourceType.USER_TASK,
             title=title,
             description=description,
             repository_path=repository_path,
+            repositories=repositories,
         )
         run = await self._orchestrator.create_run(source)
         logger.info("Created run %s: %s", run.run_id, title[:100])
@@ -86,13 +93,19 @@ class OrchestrationWorkflow:
         issue_number: int,
         title: str = "",
         description: str = "",
+        repositories: Optional[List["RepositorySpec"]] = None,
     ) -> DevPilotRunResult:
-        """Run end-to-end pipeline from a GitHub issue."""
+        """Run end-to-end pipeline from a GitHub issue.
+
+        ``repositories`` optionally declares auxiliary repositories to
+        materialize + link via the org graph (Phase 20).
+        """
         source = RunSource(
             source_type=RunSourceType.GITHUB_ISSUE,
             title=title or f"Issue #{issue_number}",
             description=description,
             repository_path=repo_url,
+            repositories=repositories,
             issue_number=issue_number,
         )
         run = await self._orchestrator.create_run(source)

@@ -1,10 +1,10 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: PROPOSED (not started)
+> **Status**: IN PROGRESS — slice A1 + A2 DONE (Session 28), A3 next
 > **Date**: August 4, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
 > knowledge layer (EKG + organization graph) is now **cross-repository**, but the
-> execution layer (`OrchestrationService`) is still bound to **one repository per
+> execution layer (`OrchestrationService`) was bound to **one repository per
 > run**. Phase 20 closes that gap and hardens the platform for production.
 
 ---
@@ -38,11 +38,18 @@ Close the execution gap on top of the org graph.
   (`backend/app/models/orchestration.py:238`) with an optional
   `repositories: List[RepoSpec]` (one primary + auxiliary repos). Backwards
   compatible: a single `repository_path` keeps today's behavior.
+  **✅ DONE (Session 28):** `RepositorySpec` + `RunSource.repositories` +
+  `DevPilotRun.auxiliary_repositories` (+ result field + `AUXILIARY_REPOSITORIES_ACQUIRED` event).
 - **A2. Orchestrator acquisition** — `_stage_acquisition` acquires the primary
   repo as today and materializes auxiliary repos via `acquire_multi`
   (deterministic `source=local`, or `github` when an acquisition service is
   injected); each aux repo is registered in the org graph + linked by declared
   relationships. Bounded by `MAX_REPOSITORIES_PER_ORG`.
+  **✅ DONE (Session 28):** `_materialize_auxiliary_repositories` delegates to
+  `OrganizationKnowledgeGraphService.acquire_and_link_repositories`, wired into
+  `execute_run` after the acquisition branch; API/CLI/`POST /api/v1/runs`
+  accept `repositories` (`--aux-repo ID=PATH`). 10 new tests;
+  full suite 1612 passed / 18 skipped / 1 pre-existing env failure.
 - **A3. Cross-repo planning context** — feed org-scope retrieval
   (`QueryScope.AUTO`/`ORGANIZATION`) into the planner stage when the task spans
   repos (ContextEngine hook already exists — wire it through planning).
@@ -88,10 +95,10 @@ Close the execution gap on top of the org graph.
 
 | Order | Slice | Why first |
 |---|---|---|
-| 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked |
+| 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked — **✅ DONE (Session 28)** |
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts |
-| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests |
+| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — API/CLI already accept `repositories` (done with A1/A2); remaining: dashboard run form |
 | 5 | B/D/E | hardening + polish (B1 needs a user infra decision) |
 
 ---
@@ -112,6 +119,7 @@ Close the execution gap on top of the org graph.
 - New deterministic tests: multi-repo run creation + acquisition (2 local repos),
   org-scope planning context inclusion, per-repo scope-violation rejection,
   per-repo EKG namespace ingestion, API/CLI contract.
-- Full deterministic suite stays green (1602 passed / 18 skipped / 1 pre-existing
-  env failure).
+  **✅ A1+A2 covered (10 tests in `tests/test_phase20_multi_repo_run.py`).**
+- Full deterministic suite stays green (**1612 passed / 18 skipped / 1 pre-existing
+  env failure**).
 - `scripts/demo_phase20.py` demos A–E (deterministic, no paid LLM).

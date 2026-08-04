@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 4, 2026 (session 27 — Phase 19C COMPLETE: multi-repo acquisition + org-graph UI wiring + demo-H stale-PG fix)
-> **Current Phase**: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1602 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **57 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data).
+> **Last updated**: August 4, 2026 (session 28 — Phase 20 slice A1+A2: multi-repository runs via org graph)
+> **Current Phase**: Phase 20 (slice A1+A2 DONE, commit pending: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories`; next slice A3 — cross-repo planning context). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1612 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **57 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20 slice A1+A2: **10 new tests** (`test_phase20_multi_repo_run.py`) — model roundtrip, materialization unit + failure paths, execute_run integration.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -1942,4 +1942,59 @@ now fully complete; no Phase 19D started.
 env failure. All Phase 19C items are committed: `5cc371a` (interactive viz),
 `1644fb3` (multi-repo acquisition + org-graph UI wiring), `2cc929b` (demo-H
 fix), `6f88fd1` (state/docs).
+
+### Session 28 (August 4, 2026) — Phase 20 slice A1+A2: Multi-Repository Runs via Org Graph 🚀
+
+First slice of the Phase 20 roadmap (`workflow-status/PHASE20_ROADMAP.md`,
+committed in `131d848`): give an autonomous run a set of **auxiliary
+repositories** that are materialized + linked into the organization graph
+alongside the primary checkout — without touching the single-repo path.
+
+**A1 — model surface (`app/models/orchestration.py`):**
+
+- New `RepositorySpec` (repository_id/name/source local|github/owner/repo/
+  path/ref/depth/relationships) mirroring the org graph's
+  `MultiRepoAcquisitionSpec` + `summary()`.
+- `RunSource.repositories: Optional[List[RepositorySpec]]` — strictly optional,
+  so every existing run (single repo or none) is unchanged.
+- `DevPilotRun.auxiliary_repositories` (recorded namespaces) + the same on
+  `DevPilotRunResult`; new `EventType.AUXILIARY_REPOSITORIES_ACQUIRED`.
+
+**A2 — orchestrator wiring (`app/services/orchestration_service.py`):**
+
+- `_get_org_service()` — lazy, graceful-None factory (same pattern as the
+  ContextEngine org hook).
+- `_materialize_auxiliary_repositories(run)` — converts `RepositorySpec`s into
+  `MultiRepoAcquisitionSpec`s and delegates to
+  `OrganizationKnowledgeGraphService.acquire_and_link_repositories`
+  (`ingest=True`). Deterministic + evidence-only: `source=local` is offline,
+  only explicitly-declared relationships become cross-repo edges, primary
+  `repository_path` is untouched, per-repo isolation preserved. Records the
+  namespaces + emits the event; on failure moves the run to FAILED.
+- Wired into `execute_run` right after the acquisition branch (covers both the
+  GitHub and local paths), before analysis.
+- API `POST /api/v1/runs` (`app/api/v1/orchestration.py`) + workflow
+  (`app/workflows/orchestration.py`) + CLI `run --aux-repo ID=PATH`
+  (`app/cli.py`) all accept/forward `repositories`.
+
+**Tests — 10 new deterministic offline tests (`tests/test_phase20_multi_repo_run.py`):**
+
+- Model: RepositorySpec roundtrip; `RunSource.repositories` optional
+  (backwards compat) + parsing.
+- Materialization unit: local aux repos registered as namespaces + cross edge
+  linked + event emitted + primary untouched; no-repos/empty-list no-op; invalid
+  local path → FAILED; org service unavailable → FAILED.
+- execute_run integration: local primary + 2 aux repos → APPROVED with
+  `auxiliary_repositories` on the result + AUX event; aux failure → FAILED.
+
+**Validation:** full deterministic suite `-m "not live"` → **1612 passed / 18
+skipped / 1 failed** (+10 new, zero regressions; the 1 failure remains the
+pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk).
+Related suites (orchestration, multi-repo acquisition, org graph, run-store,
+API contract, autonomy run-store, recovery hardening) all green.
+
+**Next:** slice A3 — cross-repo planning context (surface org-graph evidence
+for the primary repo's planner; browse the aux namespaces via the scope-aware
+query path). The roadmap also has the API/CLI/frontend wiring note that
+`repositories` is now accepted end-to-end.
 

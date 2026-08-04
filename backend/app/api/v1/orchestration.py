@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from app.models.orchestration import RunSourceType
+from app.models.orchestration import RepositorySpec, RunSourceType
 from app.workflows.orchestration import OrchestrationWorkflow
 
 router = APIRouter(prefix="/api/v1", tags=["orchestration"])
@@ -38,6 +38,22 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
         description = body.get("description", "")
         repository = body.get("repository", "")
 
+        # Phase 20: optional auxiliary repositories materialized via the org
+        # graph. Validated here so malformed specs fail fast with a 400 rather
+        # than failing mid-run (the primary repo is `repository`).
+        repositories = None
+        raw_repos = body.get("repositories")
+        if raw_repos:
+            if not isinstance(raw_repos, list):
+                raise HTTPException(status_code=400, detail="repositories must be a list")
+            try:
+                repositories = [RepositorySpec.model_validate(r) for r in raw_repos]
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid repositories spec: {exc}",
+                ) from exc
+
         if source_type == "github_issue":
             issue_number = body.get("issue_number")
             if not issue_number:
@@ -47,6 +63,7 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 issue_number=issue_number,
                 title=title,
                 description=description,
+                repositories=repositories,
             )
         else:
             result = await workflow.run_user_task(
@@ -54,6 +71,7 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 description=description,
                 repository_path=repository or None,
                 workspace_root=body.get("workspace_root"),
+                repositories=repositories,
             )
 
         return {"success": True, "data": _sanitize_result(result)}
