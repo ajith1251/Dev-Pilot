@@ -1498,8 +1498,8 @@ version mismatch, escalation dedup) — final review clean.
 16. 🚧 **Phase 19C (part 2, NOT started)** — expose cross-repository namespaces
     through the API/CLI/frontend (org-scope queries) and wire multi-repo remote
     acquisition so the organization graph can be populated from real repositories
-    instead of the synthetic demo. Recommended `git init` first (no commit
-    baseline exists for `DevPilot/`).
+    instead of the synthetic demo. (✅ `git init` DONE Session 25 — baseline
+    commit `8598153` exists; commit early and often from here on.)
 
 ### Session 19 (August 3, 2026) — Task-Analysis Stage Retry (run-API path) ✅
 
@@ -1805,8 +1805,8 @@ surface + multi-repo acquisition wiring) is NOT started.**
 
 **Caveats / known issues (carried forward):**
 
-- `DevPilot/` is still NOT a git repo — `git init` remains the top hygiene
-  recommendation.
+- ✅ `git init` DONE — baseline commit `8598153` (454 files) created this
+  session; commit early and often from here on.
 - Demo I (like A–H) persists namespaces + cross-edges into `devpilot_dev`
   when `DATABASE_URL` is set; harmless and idempotent, but it does accumulate
   in the shared dev DB. The org persistence test now tolerates this.
