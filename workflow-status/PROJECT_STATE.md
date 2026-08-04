@@ -1862,7 +1862,7 @@ d3-force strictly as a seeded, deterministic layout algorithm.
 
 **Validation:**
 
-- Backend full deterministic suite (`-m "not live"`): **1580 passed / 18
+- Backend full deterministic suite (`-m "not live"`): **1602 passed / 18
   skipped / 1 failed** (the 1 failure remains the pre-existing
   `test_wrapper_skips_cleanly_without_provider` env quirk). No regressions.
 - Frontend: **29 vitest tests passed** (graphModel 12, registryContract 4,
@@ -1876,7 +1876,7 @@ d3-force strictly as a seeded, deterministic layout algorithm.
 `workflow-status/PHASE19C_COMPLETION_REPORT.md`.
 
 **Caveats carried forward:** the pre-existing `test_wrapper_skips_cleanly_without_provider`
-env failure; demo H stale-PG flake; org-scope queries + multi-repo acquisition
-wiring into the graph UI remain the open Phase 19C item (deferred to a later
-session); all Phase 19C changes are uncommitted (baseline `8598153`).
+env failure; org-scope (cross-repo namespace) API/CLI/frontend queries remain the
+open Phase 19C item (deferred to a later session). Phase 19C is otherwise complete
+and committed (`5cc371a`, `1644fb3`, demo-H fix).
 

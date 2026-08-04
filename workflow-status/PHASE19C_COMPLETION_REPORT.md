@@ -222,11 +222,14 @@ InteractiveGraph.tsx (React Flow v12)
 
 - Pre-existing `test_wrapper_skips_cleanly_without_provider` env failure
   (`.env` Gemini key makes the wrapper subprocess run live) — unrelated to 19C
-- Demo H stale-PG flake in `demo_phase18.py` (historical TEST_SUITE rows bleed
-  into `select_tests_for_changes`) — passes on a fresh graph; fix deferred
+- ~~Demo H stale-PG flake in `demo_phase18.py`~~ — **FIXED**: `select_tests_for_changes`
+  now scopes to the newest TEST_SUITE per changed path, keyed on `graph_version`
+  (then `created_at`, `node_id`), and reads the raw reverse index to bypass
+  `MAX_EDGES_PER_NODE` (2 regression tests in `test_engineering_graph.py`)
 - Layout caching is per-page-session (browser memory), not persisted
 - The timeline diff is node/edge-level (no positional or payload diffs)
-- Org-scope queries + multi-repo remote acquisition wiring into the graph UI
+- Org-scope (cross-repo namespace) queries + multi-repo remote acquisition wiring
+  into the graph UI — multi-repo acquisition is DONE; only org-scope API/UI queries
   remain the open Phase 19C item
 
 ---
