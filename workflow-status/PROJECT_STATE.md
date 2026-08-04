@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 4, 2026 (session 28 — Phase 20 slice A1+A2: multi-repository runs via org graph)
-> **Current Phase**: Phase 20 (slice A1+A2 DONE, commit pending: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories`; next slice A3 — cross-repo planning context). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1612 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **57 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20 slice A1+A2: **10 new tests** (`test_phase20_multi_repo_run.py`) — model roundtrip, materialization unit + failure paths, execute_run integration.
+> **Last updated**: August 4, 2026 (session 29 — Phase 20 slice A3: cross-repo planning context)
+> **Current Phase**: Phase 20 (slices A1+A2+A3 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29); next slice A4 — per-repo scope enforcement). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1619 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **17 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`).
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -1997,4 +1997,60 @@ API contract, autonomy run-store, recovery hardening) all green.
 for the primary repo's planner; browse the aux namespaces via the scope-aware
 query path). The roadmap also has the API/CLI/frontend wiring note that
 `repositories` is now accepted end-to-end.
+
+### Session 29 (August 4, 2026) — Phase 20 slice A3: Cross-Repo Planning Context 🚀
+
+Second slice of Phase 20: surface the org-graph evidence (auxiliary namespaces +
+bridges materialized in A2) to the **planner** of an explicitly multi-repo run —
+while single-repo runs keep strict isolation.
+
+**ContextEngine (`app/services/context_engine.py`):**
+
+- `build_context` gained a trailing `include_organization_context: bool = False`.
+  When set, step 10b calls `_build_organization_graph_context(task, scope=QueryScope.ORGANIZATION)`
+  instead of the default `QueryScope.AUTO`.
+- `_build_organization_graph_context` accepts the scope and only applies the
+  AUTO vocabulary gate (`plan.cross_repository`) when scope is AUTO — an explicit
+  ORGANIZATION scope bypasses it. Empty/unavailable org graph still degrades to
+  no items.
+
+**OrchestrationService (`app/services/orchestration_service.py`):**
+
+- The module-level `_get_org_service()` was refactored into an instance method
+  `_get_org_graph()` with a cached `self._organization_graph` (same graceful-None
+  pattern), so the org graph acquired in A2 is shared with context building.
+- `_get_context_engine` now injects the shared graph:
+  `ContextEngine(organization_graph=self._get_org_graph())` — the 1-run
+  synchronous ordering (materialize aux repos → planner context) now sees the
+  materialized namespaces deterministically.
+- Planner call site in `_build_agent_context` passes
+  `include_organization_context=True` **only** when `agent_type == "planner"` AND
+  `run.source.repositories` AND `run.auxiliary_repositories` are both set — i.e.
+  an explicitly multi-repo run that actually materialized. Single-repo and
+  not-yet-materialized runs are byte-for-byte unchanged.
+
+**Tests — 7 new deterministic offline tests:**
+
+- Engine-level (`tests/test_organization_graph.py`,
+  `TestOrgContextEngineIntegration`): forced ORGANIZATION scope surfaces org
+  evidence for local-looking vocabulary that AUTO filters; forced scope with an
+  empty org graph degrades; forced scope with no injected org graph (lazy empty
+  fallback) degrades.
+- Orchestrator-level (`tests/test_phase20_multi_repo_run.py`,
+  `TestCrossRepoPlanningContext`): multi-repo + materialized run → planner
+  context includes "Organization knowledge graph" evidence; single-repo run →
+  isolated; multi-repo but not-yet-materialized → isolated; multi-repo with empty
+  org graph → clean.
+- A2 tests updated from `patch("..._get_org_service")` to
+  `patch.object(orch, "_get_org_graph")` after the refactor (still 10/10 green).
+
+**Validation:** full deterministic suite `-m "not live"` → **1619 passed / 18
+skipped / 1 failed** (+7 new, zero regressions; the 1 failure remains the
+pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk). Org-graph
+suite 60 passed, phase20 suite 14 passed, context-engine 55 passed,
+orchestration 82 passed.
+
+**Next:** slice A4 — per-repo scope enforcement (extend `ScopeController` +
+`deterministic_review._check_file_scope` so a patch is validated against its own
+repo's checkout, never cross-checkout). A5 (per-repo EKG ingestion) pairs with it.
 

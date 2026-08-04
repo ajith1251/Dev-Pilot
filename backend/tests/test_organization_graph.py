@@ -539,6 +539,55 @@ class TestOrgContextEngineIntegration:
             "Organization knowledge graph" in i.content for i in ctx.raw_items
         )
 
+    @pytest.mark.asyncio
+    async def test_forced_organization_scope_surfaces_org_evidence(self):
+        # Phase 20 A3: multi-repo runs force the ORGANIZATION scope so
+        # local-looking vocabulary (which AUTO would filter) still surfaces
+        # cross-repository evidence to the planner.
+        from app.services.context_engine import ContextEngine
+
+        org = build_org()
+        engine = ContextEngine(organization_graph=org)
+        ctx = await engine.build_context(
+            "explain the authentication implementation",
+            agent_type="planner",
+            include_organization_context=True,
+        )
+        contents = " ".join(i.content for i in ctx.raw_items)
+        assert "Organization knowledge graph" in contents
+        assert "repo:" in contents
+
+    @pytest.mark.asyncio
+    async def test_forced_scope_empty_org_graph_degrades_cleanly(self):
+        from app.services.context_engine import ContextEngine
+
+        org = make_org()
+        engine = ContextEngine(organization_graph=org)
+        ctx = await engine.build_context(
+            "explain the authentication implementation",
+            agent_type="planner",
+            include_organization_context=True,
+        )
+        assert not any(
+            "Organization knowledge graph" in i.content for i in ctx.raw_items
+        )
+
+    @pytest.mark.asyncio
+    async def test_forced_scope_unavailable_org_graph_degrades_cleanly(self):
+        # No org graph injected: the engine lazily falls back to an empty
+        # in-memory graph; a forced scope must still degrade gracefully.
+        from app.services.context_engine import ContextEngine
+
+        engine = ContextEngine()
+        ctx = await engine.build_context(
+            "which components are shared across repositories",
+            agent_type="planner",
+            include_organization_context=True,
+        )
+        assert not any(
+            "Organization knowledge graph" in i.content for i in ctx.raw_items
+        )
+
 
 # ── API endpoints (Phase 19A) ──────────────────────────────────
 

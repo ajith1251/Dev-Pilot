@@ -108,24 +108,6 @@ def _get_ws_manager():
     return _ws_manager
 
 
-def _get_org_service():
-    """Lazily instantiate the OrganizationKnowledgeGraphService.
-
-    Used by Phase 20 auxiliary-repository materialization. Returns None when
-    the import fails so the pipeline degrades gracefully (same pattern as the
-    ContextEngine's org-graph hook).
-    """
-    try:
-        from app.services.organization_graph_service import (
-            OrganizationKnowledgeGraphService,
-        )
-
-        return OrganizationKnowledgeGraphService()
-    except Exception:  # pragma: no cover - defensive
-        logger.warning("Organization graph service unavailable", exc_info=True)
-        return None
-
-
 def _workspace_structure(root: str, max_files: int = 300) -> str:
     """Return a compact relative file listing of a workspace.
 
@@ -223,6 +205,11 @@ class OrchestrationService:
 
         # Phase 18 — EngineeringKnowledgeGraph (lazy init, gracefully degrades)
         self._engineering_graph: Any = None
+
+        # Phase 20 — OrganizationKnowledgeGraph (lazy init, gracefully degrades).
+        # Shared single instance so materialized auxiliary repositories (A2) are
+        # immediately visible to ContextEngine's cross-repo retrieval (A3).
+        self._organization_graph: Any = None
 
     # ── WebSocket Broadcasts ─────────────────────────────────────
 
@@ -908,7 +895,7 @@ class OrchestrationService:
         if not specs:
             return True
 
-        org = _get_org_service()
+        org = self._get_org_graph()
         if org is None:
             run.failure = RunFailure(
                 stage=StageType.ACQUIRING_REPOSITORY,
@@ -1838,17 +1825,41 @@ class OrchestrationService:
     def _get_context_engine(self) -> Any:
         """Lazily initialize and return the ContextEngine.
 
-        Gracefully degrades to None if the engine is unavailable.
+        Gracefully degrades to None if the engine is unavailable. Shares the
+        organization graph instance so Phase 20 auxiliary repositories
+        materialized by this run are visible to cross-repo retrieval (A3).
         """
         if self._context_engine is not None:
             return self._context_engine
         try:
             from app.services.context_engine import ContextEngine
-            self._context_engine = ContextEngine()
+            self._context_engine = ContextEngine(
+                organization_graph=self._get_org_graph(),
+            )
         except Exception as exc:
             logger.debug("ContextEngine unavailable: %s", exc)
             self._context_engine = None
         return self._context_engine
+
+    def _get_org_graph(self) -> Any:
+        """Lazily initialize and return the shared OrganizationKnowledgeGraph.
+
+        Gracefully degrades to None if the service is unavailable. A single
+        instance per OrchestrationService keeps auxiliary repositories
+        materialized by this run (A2) visible to ContextEngine (A3).
+        """
+        if self._organization_graph is not None:
+            return self._organization_graph
+        try:
+            from app.services.organization_graph_service import (
+                OrganizationKnowledgeGraphService,
+            )
+
+            self._organization_graph = OrganizationKnowledgeGraphService()
+        except Exception as exc:
+            logger.debug("OrganizationKnowledgeGraph unavailable: %s", exc)
+            self._organization_graph = None
+        return self._organization_graph
 
     async def _build_agent_context(
         self,
@@ -1954,6 +1965,14 @@ class OrchestrationService:
                 review_findings=review_findings,
                 cross_agent_notes=all_notes or None,
                 handoffs=handoffs,
+                # Phase 20 A3: an explicitly multi-repo run forces the
+                # organization scope for the planner so cross-repository
+                # evidence (auxiliary namespaces + bridges) reaches planning.
+                include_organization_context=(
+                    agent_type == "planner"
+                    and bool(run.source.repositories)
+                    and bool(run.auxiliary_repositories)
+                ),
             )
             return ctx
         except Exception as exc:

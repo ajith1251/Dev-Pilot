@@ -143,6 +143,7 @@ class ContextEngine:
         review_findings: Optional[List[Dict[str, Any]]] = None,
         cross_agent_notes: Optional[List[str]] = None,
         handoffs: Optional[List[Any]] = None,
+        include_organization_context: bool = False,
     ) -> AgentContext:
         """Build agent-specific context from all available sources.
 
@@ -161,6 +162,10 @@ class ContextEngine:
             cross_agent_notes: Shared notes from prior agents in this run
                 (Phase 15 cross-agent context sharing).
             handoffs: Structured Phase 15 agent handoffs (bounded selection).
+            include_organization_context: Phase 20 A3 — force the organization
+                scope for cross-repository retrieval (used by multi-repo runs).
+                When False, org evidence is gated on the AUTO planner detecting
+                cross-repository vocabulary (strict isolation preserved).
 
         Returns:
             AgentContext with ranked, deduplicated, budgeted context.
@@ -243,10 +248,16 @@ class ContextEngine:
         metrics.graph_items += len(ekg_items)
 
         # 10b. Organization Knowledge Graph (Phase 19A) — cross-repository
-        #      evidence. Only adds context when the query vocabulary (or an
-        #      explicitly configured org graph) indicates cross-repository
-        #      relevance — strict isolation is preserved otherwise.
-        org_items = await self._build_organization_graph_context(task)
+        #      evidence. By default only adds context when the query vocabulary
+        #      (or an explicitly configured org graph) indicates cross-repository
+        #      relevance — strict isolation is preserved otherwise. Phase 20 A3:
+        #      multi-repo runs force the ORGANIZATION scope for the planner.
+        org_scope = (
+            QueryScope.ORGANIZATION
+            if include_organization_context
+            else QueryScope.AUTO
+        )
+        org_items = await self._build_organization_graph_context(task, scope=org_scope)
         candidates.extend(org_items)
         metrics.graph_items += len(org_items)
 
@@ -756,26 +767,33 @@ class ContextEngine:
     async def _build_organization_graph_context(
         self,
         task: str,
+        scope: QueryScope = QueryScope.AUTO,
     ) -> List[ContextItem]:
         """Build context from the Phase 19A Organization Knowledge Graph.
 
-        Only runs a cross-repository query when the org graph has registered
-        repositories AND the planner's AUTO scope detects cross-repository
-        vocabulary (deterministic). Evidence is attributed per-repository so
-        an agent can see which namespace contributed each node — repository
-        isolation is preserved because the org graph only exposes explicitly
-        linked repositories through the organization scope.
+        With the default AUTO scope, only runs a cross-repository query when the
+        org graph has registered repositories AND the planner's AUTO scope
+        detects cross-repository vocabulary (deterministic) — an explicit
+        ORGANIZATION scope (Phase 20 A3 multi-repo runs) bypasses that gate.
+        Evidence is attributed per-repository so an agent can see which
+        namespace contributed each node — repository isolation is preserved
+        because the org graph only exposes explicitly linked repositories
+        through the organization scope.
         """
         items: List[ContextItem] = []
         org = self._get_organization_graph()
         if org is None or not org.repositories():
             return items
         try:
-            result = await org.query(task, limit=10, scope=QueryScope.AUTO)
+            result = await org.query(task, limit=10, scope=scope)
             plan = result.plan
-            # Only surface cross-repository evidence; otherwise the local
-            # EKG context already covers repository-local retrieval.
-            if plan is None or not plan.cross_repository:
+            # AUTO keeps strict isolation: only surface cross-repository
+            # evidence; otherwise the local EKG context already covers
+            # repository-local retrieval. An explicit ORGANIZATION scope is
+            # unconditional.
+            if scope == QueryScope.AUTO and (
+                plan is None or not plan.cross_repository
+            ):
                 return items
             if not result.nodes:
                 return items

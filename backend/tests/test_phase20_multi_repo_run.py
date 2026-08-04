@@ -152,8 +152,7 @@ class TestMaterializeAuxiliaryRepositories:
         ]
         orch, run = await self._make_run(specs)
         org = OrganizationKnowledgeGraphService()
-        with patch("app.services.orchestration_service._get_org_service",
-                   return_value=org):
+        with patch.object(orch, "_get_org_graph", return_value=org):
             ok = await orch._materialize_auxiliary_repositories(run)
 
         assert ok is True
@@ -189,8 +188,7 @@ class TestMaterializeAuxiliaryRepositories:
         specs = [RepositorySpec(repository_id="repo-missing", path=str(tmp_path / "nope"))]
         orch, run = await self._make_run(specs)
         org = OrganizationKnowledgeGraphService()
-        with patch("app.services.orchestration_service._get_org_service",
-                   return_value=org):
+        with patch.object(orch, "_get_org_graph", return_value=org):
             ok = await orch._materialize_auxiliary_repositories(run)
 
         assert ok is False
@@ -204,8 +202,7 @@ class TestMaterializeAuxiliaryRepositories:
         d = _make_repo(tmp_path, "repo-x", {"a.py": "x"})
         specs = [RepositorySpec(repository_id="repo-x", path=d)]
         orch, run = await self._make_run(specs)
-        with patch("app.services.orchestration_service._get_org_service",
-                   return_value=None):
+        with patch.object(orch, "_get_org_graph", return_value=None):
             ok = await orch._materialize_auxiliary_repositories(run)
 
         assert ok is False
@@ -289,3 +286,113 @@ class TestExecuteRunAuxRepositories:
         assert "Auxiliary repository materialization failed" in result.failure.message
         fresh = await orch._store.get(run.run_id)
         assert fresh.status == RunStatus.FAILED
+
+
+# ── A3: cross-repo planning context (ContextEngine integration) ─
+
+
+def _build_org():
+    """A small org graph: repo-a + repo-b namespaces, one cross link."""
+    from app.models.engineering_graph import EKNodeType
+
+    org = OrganizationKnowledgeGraphService()
+    for rid in ("repo-a", "repo-b"):
+        org.register_repository(
+            rid, name=f"Repository {rid}", path=f"/repos/{rid}",
+            source_type="local", organization_id="default",
+        )
+        g = org.get_graph(rid)
+        assert g is not None
+        g.add_node(
+            EKNodeType.FILE, f"{rid}/shared_utils.py",
+            source_ref=f"{rid}:shared_utils.py", source_type="repository",
+            qualified_name=f"{rid}/shared_utils.py",
+            payload={"kind": "file", "name": "shared_utils.py"},
+            provenance={"repository_id": rid, "source": "test"},
+        )
+    return org
+
+
+class TestCrossRepoPlanningContext:
+    async def _make_run(self, title, specs, aux):
+        orch = OrchestrationService()
+        source = RunSource(
+            source_type=RunSourceType.USER_TASK,
+            title=title,
+            repository_path="/primary",
+            repositories=specs,
+        )
+        run = await orch.create_run(source)
+        run.requirements = _make_reqs()
+        run.plan = _make_plan()
+        run.auxiliary_repositories = aux
+        await orch._store.update(run)
+        return orch, run
+
+    def _contents(self, ctx) -> str:
+        return " ".join(i.content for i in ctx.raw_items)
+
+    @pytest.mark.asyncio
+    async def test_multi_repo_planner_context_includes_org_evidence(self):
+        # Local-looking vocabulary that AUTO scope would filter out — the
+        # forced ORGANIZATION scope (multi-repo run) must still surface the
+        # org-graph cross-repository evidence to the planner.
+        orch, run = await self._make_run(
+            "explain the authentication implementation",
+            [RepositorySpec(repository_id="repo-a", path="/aux/a")],
+            aux=[{"repository_id": "repo-a", "path": "/aux/a"}],
+        )
+        org = _build_org()
+        with patch.object(orch, "_get_org_graph", return_value=org):
+            ctx = await orch._build_agent_context(run, "planner")
+
+        assert ctx is not None
+        contents = self._contents(ctx)
+        assert "Organization knowledge graph" in contents
+        assert "repo-a" in contents
+
+    @pytest.mark.asyncio
+    async def test_single_repo_planner_context_remains_isolated(self):
+        # Single-repo run: even with a populated org graph, the planner's
+        # context must not include organization evidence (AUTO gate holds).
+        orch, run = await self._make_run(
+            "explain the authentication implementation",
+            None,
+            aux=[],
+        )
+        org = _build_org()
+        with patch.object(orch, "_get_org_graph", return_value=org):
+            ctx = await orch._build_agent_context(run, "planner")
+
+        assert ctx is not None
+        assert "Organization knowledge graph" not in self._contents(ctx)
+
+    @pytest.mark.asyncio
+    async def test_multi_repo_context_without_aux_records_isolated(self):
+        # A run that declares repositories but never materialized them
+        # (auxiliary_repositories empty) must stay isolated — no forced scope.
+        orch, run = await self._make_run(
+            "explain the authentication implementation",
+            [RepositorySpec(repository_id="repo-a", path="/aux/a")],
+            aux=[],
+        )
+        org = _build_org()
+        with patch.object(orch, "_get_org_graph", return_value=org):
+            ctx = await orch._build_agent_context(run, "planner")
+
+        assert ctx is not None
+        assert "Organization knowledge graph" not in self._contents(ctx)
+
+    @pytest.mark.asyncio
+    async def test_multi_repo_empty_org_graph_degrades_cleanly(self):
+        orch, run = await self._make_run(
+            "which components are shared across repositories",
+            [RepositorySpec(repository_id="repo-a", path="/aux/a")],
+            aux=[{"repository_id": "repo-a", "path": "/aux/a"}],
+        )
+        org = OrganizationKnowledgeGraphService()
+        with patch.object(orch, "_get_org_graph", return_value=org):
+            ctx = await orch._build_agent_context(run, "planner")
+
+        assert ctx is not None
+        assert "Organization knowledge graph" not in self._contents(ctx)
