@@ -24,6 +24,8 @@ export interface GraphNode {
   source_type: string;
   status: string;
   graph_version: number;
+  /** Owning repository namespace; always present on org-query/traversal nodes. */
+  repository_id?: string;
   payload: Record<string, unknown>;
   provenance: Record<string, unknown>;
   created_at: string;

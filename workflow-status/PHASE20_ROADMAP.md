@@ -171,6 +171,17 @@ Close the execution gap on top of the org graph.
 - Upgrade `/dashboard/organization-graph` from the legacy `ForceDirectedGraph` to
   the React Flow engine + timeline diff + live WS used on
   `/dashboard/engineering-graph` (`InteractiveGraph.tsx`, `useGraphSocket.ts`).
+  **✅ DONE (Session 36):** org page migrated onto `InteractiveGraph.tsx` with
+  search filter (`applyViewFilters`), neighbor highlight/focus, Timeline Diff
+  section (`graphApi.version`/`diff` + `summarizeDiff`), and a live-WS badge +
+  auto-refresh on `version_incremented`. Pure mappers extracted to
+  `frontend/src/lib/graph/orgGraphModel.ts` (`repoVizId`, `repoNodeId`,
+  `reposToVizNodes`, `crossEdgesToVizEdges`, `orgNodesToVizNodes`,
+  `orgEdgesToVizEdges`, `clusterVirtualEdges`, `mergeOrgGraph`); optional
+  `GraphNode.repository_id` added (backend always emits it). Legacy
+  `ForceDirectedGraph.tsx` deleted (sole consumer migrated; duplicated
+  registries removed). 10 new vitest tests — frontend **49 passed (7 files)**,
+  `next build` EXIT=0 (18 routes).
 
 ### E. Test-Framework Parsers (extension)
 

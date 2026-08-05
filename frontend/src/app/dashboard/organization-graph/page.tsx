@@ -8,8 +8,32 @@ import type {
   OrgRepository,
   OrgStats,
 } from "@/lib/api/organizationGraph";
-import { ForceGraph, hexFor, nodeTypeLabel } from "@/components/graph/ForceDirectedGraph";
-import type { VizEdge, VizNode } from "@/components/graph/ForceDirectedGraph";
+import { graphApi } from "@/lib/api/engineeringGraph";
+import type { GraphDiff } from "@/lib/api/engineeringGraph";
+import { InteractiveGraph } from "@/components/graph/InteractiveGraph";
+import {
+  applyViewFilters,
+  hexFor,
+  nodeTypeLabel,
+  relHex,
+  relLabel,
+  summarizeDiff,
+  truncate,
+  type VizEdge,
+  type VizNode,
+} from "@/lib/graph/graphModel";
+import {
+  REPO_PREFIX,
+  clusterVirtualEdges,
+  crossEdgesToVizEdges,
+  mergeOrgGraph,
+  orgEdgesToVizEdges,
+  orgNodesToVizNodes,
+  repoNodeId,
+  repoVizId,
+  reposToVizNodes,
+} from "@/lib/graph/orgGraphModel";
+import { useGraphSocket, useLatestGraphEvent } from "@/lib/graph/useGraphSocket";
 
 const CROSS_RELATIONSHIPS = [
   "depends_on_repository",
@@ -27,16 +51,6 @@ function fmtTime(ts: string): string {
   } catch {
     return ts || "";
   }
-}
-
-const REPO_PREFIX = "repo:";
-
-function repoVizId(repositoryId: string): string {
-  return `${REPO_PREFIX}${repositoryId}`;
-}
-
-function repoNodeId(repositoryId: string): string {
-  return `REPO::${repositoryId}`.slice(0, 40);
 }
 
 // ── Sub-components ─────────────────────────────────────────────
@@ -60,6 +74,30 @@ function StatCard({
   );
 }
 
+function SectionCard({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div>
+          <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+            {title}
+          </h2>
+          {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 const inputCls =
   "w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary-500";
 const labelCls = "block text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1";
@@ -74,19 +112,24 @@ export default function OrganizationGraphPage() {
   const [stats, setStats] = useState<OrgStats | null>(null);
   const [repos, setRepos] = useState<OrgRepository[]>([]);
   const [crossEdges, setCrossEdges] = useState<OrgCrossEdge[]>([]);
-  const [vizNodes, setVizNodes] = useState<VizNode[]>([]);
-  const [vizEdges, setVizEdges] = useState<VizEdge[]>([]);
+  const [graph, setGraph] = useState<{ nodes: VizNode[]; edges: VizEdge[] }>({
+    nodes: [],
+    edges: [],
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [rootId, setRootId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState(0);
+  const [fitToken, setFitToken] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [searchTerm, setSearchTerm] = useState("");
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<"auto" | "local" | "organization">("auto");
   const [localRepoId, setLocalRepoId] = useState("");
   const [queryResult, setQueryResult] = useState<OrgQueryResult | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
-  const [viewReset, setViewReset] = useState(0);
 
   const [repoForm, setRepoForm] = useState({
     repository_id: "",
@@ -119,6 +162,19 @@ export default function OrganizationGraphPage() {
   const [acquireBusy, setAcquireBusy] = useState(false);
   const [acquireNote, setAcquireNote] = useState<string | null>(null);
 
+  // Phase 20D — live graph updates + timeline diff.
+  const ws = useGraphSocket();
+  const liveEvent = useLatestGraphEvent();
+  const [liveNotice, setLiveNotice] = useState<string | null>(null);
+  const [versions, setVersions] = useState<
+    { version: number; run_id: string; summary: string; timestamp: string }[]
+  >([]);
+  const [fromVersion, setFromVersion] = useState<number | null>(null);
+  const [toVersion, setToVersion] = useState<number | null>(null);
+  const [diff, setDiff] = useState<GraphDiff | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+
   const loadOrg = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -131,25 +187,10 @@ export default function OrganizationGraphPage() {
       setStats(s);
       setRepos(r);
       setCrossEdges(ce);
-      setVizNodes(
-        r.map((repo) => ({
-          id: repoVizId(repo.repository_id),
-          label: repo.name || repo.repository_id,
-          nodeType: "repository",
-          repositoryId: repo.repository_id,
-          sublabel: repo.source_type,
-          data: repo as unknown as { [k: string]: unknown },
-        }))
-      );
-      setVizEdges(
-        ce.map((e) => ({
-          id: e.edge_id,
-          source: repoVizId(e.source_repository_id),
-          target: repoVizId(e.target_repository_id),
-          relationship: e.relationship,
-          weight: e.weight,
-        }))
-      );
+      setGraph({
+        nodes: reposToVizNodes(r),
+        edges: crossEdgesToVizEdges(ce),
+      });
     } catch (e: any) {
       setError(e?.message || "Failed to load organization graph");
     } finally {
@@ -157,60 +198,44 @@ export default function OrganizationGraphPage() {
     }
   }, []);
 
+  const loadVersions = useCallback(async () => {
+    try {
+      const v = await graphApi.version();
+      setVersions([...v.history].sort((a, b) => a.version - b.version));
+    } catch {
+      // Non-fatal.
+    }
+  }, []);
+
   useEffect(() => {
     loadOrg();
-  }, [loadOrg]);
+    loadVersions();
+  }, [loadOrg, loadVersions]);
+
+  // ── Live updates (Phase 20D): refresh org data on version increments ──
+  useEffect(() => {
+    if (!liveEvent) return;
+    if (liveEvent.event_type === "version_incremented") {
+      setLiveNotice(
+        `Graph updated to v${liveEvent.data.version}${
+          liveEvent.data.run_id ? ` by ${truncate(liveEvent.data.run_id, 40)}` : ""
+        }`
+      );
+      void loadOrg();
+      void loadVersions();
+    }
+  }, [liveEvent, loadOrg, loadVersions]);
 
   const mergeResult = useCallback(
     (res: OrgQueryResult, expandSource?: string) => {
-      setVizNodes((prev) => {
-        const m = new Map(prev.map((n) => [n.id, n]));
-        for (const n of res.nodes) {
-          if (!m.has(n.node_id)) {
-            m.set(n.node_id, {
-              id: n.node_id,
-              label: n.name || n.node_id,
-              nodeType: n.node_type,
-              repositoryId: (n as { repository_id?: string }).repository_id,
-              sublabel: n.source_ref,
-              data: n as unknown as { [k: string]: unknown },
-            });
-          }
-        }
-        return [...m.values()];
-      });
-      setVizEdges((prev) => {
-        const m = new Map(prev.map((e) => [e.id, e]));
-        for (const e of res.edges) {
-          const id = e.edge_id || `${e.source_id}->${e.target_id}`;
-          if (!m.has(id)) {
-            m.set(id, {
-              id,
-              source: e.source_id,
-              target: e.target_id,
-              relationship: e.relationship,
-              weight: e.weight,
-            });
-          }
-        }
-        // Cluster every result node under its owning repository.
-        const cluster = new Map(m);
-        for (const n of res.nodes) {
-          const rid = (n as { repository_id?: string }).repository_id;
-          if (rid && rid !== "default") {
-            cluster.set(`virt:${rid}:${n.node_id}`, {
-              id: `virt:${rid}:${n.node_id}`,
-              source: repoVizId(rid),
-              target: n.node_id,
-              relationship: "in_repository",
-              weight: 0.3,
-              virtual: true,
-            });
-          }
-        }
-        return [...cluster.values()];
-      });
+      setGraph((prev) =>
+        mergeOrgGraph(prev, {
+          nodes: orgNodesToVizNodes(res.nodes),
+          edges: clusterVirtualEdges(res.nodes, orgEdgesToVizEdges(res.edges)),
+        })
+      );
       setSelectedId(expandSource || null);
+      if (expandSource) setFocusId(expandSource);
     },
     []
   );
@@ -260,6 +285,7 @@ export default function OrganizationGraphPage() {
           total_nodes: res.total_nodes,
           version: res.version,
         };
+        setRootId((prev) => prev ?? id);
         mergeResult(payload, id);
       } catch (e: any) {
         setError(e?.message || "Expansion failed");
@@ -269,6 +295,11 @@ export default function OrganizationGraphPage() {
     },
     [mergeResult]
   );
+
+  const selectNode = useCallback((id: string | null) => {
+    setSelectedId(id);
+    if (id) setFocusId(id);
+  }, []);
 
   const registerRepo = useCallback(
     async (ev: React.FormEvent) => {
@@ -334,11 +365,51 @@ export default function OrganizationGraphPage() {
     [manifestText, loadOrg]
   );
 
+  // ── View filtering + selection highlighting ──────────────────
+
+  const visible = useMemo(
+    () => applyViewFilters(graph.nodes, graph.edges, { search: searchTerm }),
+    [graph.nodes, graph.edges, searchTerm]
+  );
+
+  const highlightedIds = useMemo(() => {
+    if (!selectedId) return null;
+    const set = new Set<string>([selectedId]);
+    for (const e of graph.edges) {
+      if (e.source === selectedId) set.add(e.target);
+      if (e.target === selectedId) set.add(e.source);
+    }
+    return set;
+  }, [selectedId, graph.edges]);
+
+  // ── Timeline diff (Phase 20D) ────────────────────────────────
+
+  useEffect(() => {
+    if (versions.length && fromVersion == null && toVersion == null) {
+      setFromVersion(versions[0].version);
+      setToVersion(versions[versions.length - 1].version);
+    }
+  }, [versions, fromVersion, toVersion]);
+
+  const runDiff = useCallback(async () => {
+    if (fromVersion == null || toVersion == null) return;
+    setDiffLoading(true);
+    setDiffError(null);
+    try {
+      setDiff(await graphApi.diff(fromVersion, toVersion));
+    } catch (e: any) {
+      setDiffError(e?.message || "Diff failed");
+      setDiff(null);
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [fromVersion, toVersion]);
+
   // ── Inspector data ───────────────────────────────────────────
 
   const selectedNode = useMemo(
-    () => vizNodes.find((n) => n.id === selectedId) || null,
-    [vizNodes, selectedId]
+    () => visible.nodes.find((n) => n.id === selectedId) || null,
+    [visible.nodes, selectedId]
   );
   const selectedRepo =
     selectedNode && selectedNode.nodeType === "repository"
@@ -353,22 +424,49 @@ export default function OrganizationGraphPage() {
     );
   }, [selectedId, crossEdges]);
 
-  const showNodeLabel = (node: VizNode) =>
-    node.nodeType === "repository" ||
-    selectedId === node.id ||
-    hoveredId === node.id;
+  const diffSummary = diff ? summarizeDiff(diff) : null;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-          Organization Knowledge Graph
-        </h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Force-directed view of repository namespaces and their explicit
-          cross-repository links. Repositories stay isolated — only
-          deterministic links bridge the boundary.
-        </p>
+      {/* Header + live badge */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
+            Organization Knowledge Graph
+          </h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            Interactive view of repository namespaces and their explicit
+            cross-repository links, on the React Flow engine. Repositories stay
+            isolated — only deterministic links bridge the boundary.
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1.5">
+          <span
+            className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${
+              ws.status === "open"
+                ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300"
+                : ws.status === "reconnecting" || ws.status === "connecting"
+                  ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
+                  : "bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                ws.status === "open"
+                  ? "bg-green-500"
+                  : ws.status === "reconnecting" || ws.status === "connecting"
+                    ? "bg-amber-400 animate-pulse"
+                    : "bg-slate-400"
+              }`}
+            />
+            live graph · {ws.status}
+          </span>
+          {liveNotice && (
+            <span className="text-[11px] font-mono text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20 rounded px-2 py-1">
+              {liveNotice}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Stats */}
@@ -452,26 +550,14 @@ export default function OrganizationGraphPage() {
               )}
               <button
                 onClick={() => {
-                  setVizNodes(
-                    repos.map((r) => ({
-                      id: repoVizId(r.repository_id),
-                      label: r.name || r.repository_id,
-                      nodeType: "repository",
-                      repositoryId: r.repository_id,
-                      sublabel: r.source_type,
-                      data: r as unknown as { [k: string]: unknown },
-                    }))
-                  );
-                  setVizEdges(
-                    crossEdges.map((e) => ({
-                      id: e.edge_id,
-                      source: repoVizId(e.source_repository_id),
-                      target: repoVizId(e.target_repository_id),
-                      relationship: e.relationship,
-                      weight: e.weight,
-                    }))
-                  );
+                  setGraph({
+                    nodes: reposToVizNodes(repos),
+                    edges: crossEdgesToVizEdges(crossEdges),
+                  });
                   setSelectedId(null);
+                  setRootId(null);
+                  setFocusId(null);
+                  setSearchTerm("");
                 }}
                 className={btnGhost}
               >
@@ -495,7 +581,7 @@ export default function OrganizationGraphPage() {
                   {queryResult.nodes.slice(0, 20).map((n) => (
                     <button
                       key={n.node_id}
-                      onClick={() => setSelectedId(n.node_id)}
+                      onClick={() => selectNode(n.node_id)}
                       className={`w-full text-left flex items-start gap-2 px-2 py-1.5 rounded-md text-xs ${
                         selectedId === n.node_id
                           ? "bg-indigo-50 dark:bg-indigo-900/30 ring-1 ring-indigo-500/40"
@@ -511,7 +597,7 @@ export default function OrganizationGraphPage() {
                           {n.name || n.node_id}
                         </span>
                         <span className="block text-[10px] font-mono text-slate-400 truncate">
-                          {nodeTypeLabel(n.node_type)} · {(n as { repository_id?: string }).repository_id}
+                          {nodeTypeLabel(n.node_type)} · {n.repository_id}
                         </span>
                       </span>
                     </button>
@@ -698,44 +784,206 @@ export default function OrganizationGraphPage() {
 
         {/* Right: canvas + inspector */}
         <div className="lg:col-span-2 space-y-6">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                Force-Directed Graph
-              </h2>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setViewReset((v) => v + 1)}
-                  className={btnGhost}
-                >
-                  Reset view
-                </button>
-                <button
-                  onClick={loadOrg}
-                  disabled={loading}
-                  className={btnGhost}
-                >
-                  {loading ? "…" : "Refresh"}
-                </button>
-              </div>
+          <SectionCard
+            title="Interactive Graph"
+            subtitle="React Flow engine · d3-force layout · click to inspect, double-click to expand neighbors"
+          >
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Filter current graph: name, symbol, ref…"
+                className={inputCls}
+              />
+              <button
+                onClick={() => setFitToken((t) => t + 1)}
+                title="Fit graph to view"
+                className={btnGhost}
+              >
+                Fit
+              </button>
+              <button
+                onClick={() => setResetToken((t) => t + 1)}
+                title="Re-run force layout"
+                className={btnGhost}
+              >
+                Relayout
+              </button>
+              <button
+                onClick={loadOrg}
+                disabled={loading}
+                className={btnGhost}
+              >
+                {loading ? "…" : "Refresh"}
+              </button>
             </div>
-            <ForceGraph
-              nodes={vizNodes}
-              edges={vizEdges}
+            <InteractiveGraph
+              nodes={visible.nodes}
+              edges={visible.edges}
               selectedId={selectedId}
-              hoveredId={hoveredId}
-              resetToken={viewReset}
-              onSelect={setSelectedId}
-              onHover={setHoveredId}
+              highlightedIds={highlightedIds}
+              rootId={rootId}
+              focusId={focusId}
+              resetToken={resetToken}
+              fitToken={fitToken}
+              heightClass="h-[560px]"
+              onSelectNode={selectNode}
+              onExpandNode={(id) => void expandNode(id)}
+              onRelayout={() => setResetToken((t) => t + 1)}
             />
-            {selectedId && selectedNode && (
-              <div className="mt-2 text-[11px] text-slate-400">
-                {showNodeLabel(selectedNode)
-                  ? `${nodeTypeLabel(selectedNode.nodeType)} selected`
-                  : "Node selected"}
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+              <span>keys: F fit · R relayout · Esc deselect</span>
+              <span className="font-mono">
+                showing {visible.nodes.length}/{graph.nodes.length} nodes ·{" "}
+                {visible.edges.length}/{graph.edges.length} edges
+              </span>
+            </div>
+          </SectionCard>
+
+          {/* Timeline diff (Phase 20D) */}
+          <SectionCard
+            title="Timeline Diff"
+            subtitle="Compare any two graph versions (runs, cross-links, evidence)"
+          >
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className={labelCls}>from</label>
+                <select
+                  value={fromVersion ?? ""}
+                  onChange={(e) => setFromVersion(Number(e.target.value))}
+                  disabled={versions.length === 0}
+                  className={inputCls}
+                >
+                  <option value="" disabled>
+                    —
+                  </option>
+                  {versions.map((v) => (
+                    <option key={v.version} value={v.version}>
+                      v{v.version}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>to</label>
+                <select
+                  value={toVersion ?? ""}
+                  onChange={(e) => setToVersion(Number(e.target.value))}
+                  disabled={versions.length === 0}
+                  className={inputCls}
+                >
+                  <option value="" disabled>
+                    —
+                  </option>
+                  {versions.map((v) => (
+                    <option key={v.version} value={v.version}>
+                      v{v.version}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={() => void runDiff()}
+                disabled={diffLoading || fromVersion == null || toVersion == null}
+                className={btnPrimary}
+              >
+                {diffLoading ? "…" : "Diff"}
+              </button>
+            </div>
+
+            {diffError && (
+              <div className="mt-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg px-3 py-2">
+                {diffError}
               </div>
             )}
-          </div>
+
+            {diffSummary && diff && (
+              <div className="mt-4 space-y-3">
+                <div className="flex flex-wrap gap-3 text-xs">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    {diffSummary.label}
+                  </span>
+                  <span className="text-emerald-600 dark:text-emerald-400">
+                    +{diffSummary.added} added
+                  </span>
+                  <span className="text-rose-600 dark:text-rose-400">
+                    −{diffSummary.removed} removed
+                  </span>
+                  <span className="text-slate-400">
+                    {diffSummary.changedEdges} edges changed
+                  </span>
+                </div>
+                {diff.added_nodes.length > 0 && (
+                  <div>
+                    <div className={labelCls}>Added nodes</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-[160px] overflow-y-auto">
+                      {diff.added_nodes.slice(0, 40).map((n) => (
+                        <button
+                          key={n.node_id}
+                          onClick={() => selectNode(n.node_id)}
+                          className="flex items-center gap-2 text-left text-xs rounded-md px-2 py-1 hover:bg-slate-50 dark:hover:bg-slate-700/60"
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ background: hexFor(n.node_type) }}
+                          />
+                          <span className="min-w-0 truncate text-slate-700 dark:text-slate-200">
+                            {n.name || n.node_id}
+                          </span>
+                          <span className="ml-auto shrink-0 text-[10px] font-mono text-slate-400">
+                            {nodeTypeLabel(n.node_type)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {diff.removed_nodes.length > 0 && (
+                  <div>
+                    <div className={labelCls}>Removed nodes</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-[160px] overflow-y-auto">
+                      {diff.removed_nodes.slice(0, 40).map((n) => (
+                        <div
+                          key={n.node_id}
+                          className="flex items-center gap-2 text-xs rounded-md px-2 py-1 opacity-70"
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ background: hexFor(n.node_type) }}
+                          />
+                          <span className="min-w-0 truncate text-slate-600 dark:text-slate-300">
+                            {n.name || n.node_id}
+                          </span>
+                          <span className="ml-auto shrink-0 text-[10px] font-mono text-slate-400">
+                            {nodeTypeLabel(n.node_type)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {diff.per_version.length > 0 && (
+                  <div>
+                    <div className={labelCls}>Per-version</div>
+                    <div className="space-y-1">
+                      {diff.per_version.map((v) => (
+                        <div
+                          key={v.version}
+                          className="flex items-center gap-2 text-[11px] font-mono text-slate-500"
+                        >
+                          <span className="font-semibold">v{v.version}</span>
+                          <span className="truncate">{truncate(v.summary || "", 80)}</span>
+                          <span className="ml-auto shrink-0 text-slate-400">
+                            +{v.added} / −{v.removed} / {v.changed_edges} edges
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </SectionCard>
 
           {/* Inspector */}
           {selectedNode && (
@@ -769,7 +1017,7 @@ export default function OrganizationGraphPage() {
                   <button onClick={() => expandNode(selectedNode.id)} className={btnGhost}>
                     Expand
                   </button>
-                  <button onClick={() => setSelectedId(null)} className={btnGhost}>
+                  <button onClick={() => selectNode(null)} className={btnGhost}>
                     Close
                   </button>
                 </div>
@@ -812,7 +1060,14 @@ export default function OrganizationGraphPage() {
                         <span className="text-slate-500 truncate">
                           {e.source_repository_id}
                         </span>
-                        <span className="text-rose-500 font-semibold shrink-0">
+                        <span
+                          className="inline-flex items-center gap-1.5 shrink-0"
+                          title={relLabel(e.relationship)}
+                        >
+                          <span
+                            className="w-3 h-0.5 rounded"
+                            style={{ backgroundColor: relHex(e.relationship) }}
+                          />
                           ─[{e.relationship}]→
                         </span>
                         <span className="text-slate-600 dark:text-slate-300 truncate">

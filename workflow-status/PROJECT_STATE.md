@@ -1,7 +1,7 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 35 — Phase 20B slice B3: mid-stream token-loss failover)
-> **Current Phase**: Phase 20B (B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list; B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`; B1 billing/Vertex AI still needs a user infra decision). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Last updated**: August 5, 2026 (session 36 — Phase 20 Workstream D: org-graph UI parity on the React Flow engine)
+> **Current Phase**: Phase 20 — Workstream D COMPLETE (Session 36: `/dashboard/organization-graph` migrated onto `InteractiveGraph.tsx` + timeline diff + live WS; legacy `ForceDirectedGraph.tsx` deleted; pure mappers in `frontend/src/lib/graph/orgGraphModel.ts`; frontend vitest 49 passed (7 files), `next build` EXIT=0). Phase 20B (B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list; B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`; B1 billing/Vertex AI still needs a user infra decision). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
 > **Total tests**: **1672 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **17 new tests** — B2: 12 (7 router capability fallbacks + 4 config parsing + 1 planner wiring), B3: 5 (4 stream-resume behaviour + 1 config parse; `test_provider_router.py` now 59). `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
@@ -9,7 +9,7 @@
 > **Live-LLM (Gemini)**: `scripts/demo_phase17.py --live` runs end-to-end on the free tier — 5 patches generated & applied, 3 real consensus records + 5 contradictions in Demonstration A, autonomy goal surfaces 3 consensus topics; multi-model daily-quota failover + 24h TTL recovery keep long-lived processes alive across midnight resets. Full report: `docs/GEMINI_API_KEY_REPORT.md`
 > **Total files**: 300+
 > **Frontend goal view**: Live status via **WebSocket push** (polling fallback), decision timeline, plan-version diffing, budget usage bars, escalation queue (resume/cancel/input) wired to `/v1/autonomy`
-> **Frontend EKG view**: Graph explorer at `/dashboard/engineering-graph` — query box (planner-driven), node inspector (type/status/version, edges, provenance, related evidence, temporal history, payload), version stats + history table, node distribution chips, **force-directed neighborhood view** (select a node to expand it 1-3 hops, shared `ForceDirectedGraph` SVG canvas); real `/api/v1/graph/*` endpoints only
+> **Frontend EKG view**: Graph explorer at `/dashboard/engineering-graph` — query box (planner-driven), node inspector (type/status/version, edges, provenance, related evidence, temporal history, payload), version stats + history table, node distribution chips, **interactive React Flow view** (shared `InteractiveGraph` engine — select a node to inspect/expand 1-3 hops, filters/search, timeline diff, live WS); `/dashboard/organization-graph` runs the same React Flow engine (Session 36); real `/api/v1/graph/*` + `/api/v1/graph/org/*` endpoints only
 > **Database**: PostgreSQL 18.4 — 27 tables (+1: provider_metric_snapshots via migration 014; earlier +3: ekg_nodes, ekg_edges, ekg_versions via migration 011)
 > **Recovery**: Automatic startup recovery — stale runs marked FAILED, recoverable runs logged
 > **Code Intelligence**: Semantic graph with 18 symbol kinds, 12 relationship types, bounded traversal, impact analysis; tree-sitter parsers for Java, Go, Rust, C/C++, C#, Kotlin, Swift, Ruby, PHP; PostgreSQL graph persistence + pgvector embeddings
@@ -2384,5 +2384,53 @@ token-loss recovery) + §3 config table + §9 future directions,
 user infra decision; all unblocked B slices (B2, B3) are done. Then workstream D
 (org-graph UI parity on the React Flow engine) and E (extra test-framework
 parsers). Workstream C (live E2E) re-runs after a Gemini quota reset.
+
+---
+
+### Session 36 (August 5, 2026) — Phase 20 Workstream D: Org-Graph UI Parity on the React Flow Engine
+
+**Goal:** upgrade `/dashboard/organization-graph` from the legacy
+`ForceDirectedGraph` to the same React Flow engine + timeline diff + live WS
+used on `/dashboard/engineering-graph` (`InteractiveGraph.tsx`,
+`useGraphSocket.ts`), and delete the duplicated legacy implementation.
+
+**Pre-audit (mandatory, done before any code):** confirmed `.ai-memory/` did not
+exist anywhere (memory pivot: `AGENTS.md` + `workflow-status/*`); inventoried the
+graph infrastructure. Findings — already implemented & reused: `InteractiveGraph.tsx`
+(React Flow v12 engine), `useGraphSocket.ts` (live WS singleton), `graphModel.ts`
+(VizNode/VizEdge, registries, filters, seeded layout, `summarizeDiff`), the EKG +
+org API clients, timeline diff API. Missing: the org page still rendered on
+`ForceGraph`. Tech debt: `ForceDirectedGraph.tsx` duplicated `NODE_HEX`/`hexFor`/
+`nodeTypeLabel`/`truncate`/`VizNode`/`VizEdge` from `graphModel.ts`.
+
+**Changes.**
+
+- **New** `frontend/src/lib/graph/orgGraphModel.ts` — pure org→Viz mappers:
+  `repoVizId`, `repoNodeId` (40-char cap), `reposToVizNodes`,
+  `crossEdgesToVizEdges`, `orgNodesToVizNodes`, `orgEdgesToVizEdges` (synthesized
+  id fallback), `clusterVirtualEdges` (`in_repository` virtual cluster edges),
+  `mergeOrgGraph` (add-only dedup).
+- **Modified** `frontend/src/lib/api/engineeringGraph.ts` — optional
+  `GraphNode.repository_id?: string` (backend `_node_to_api` always emits it at
+  the top level — verified `backend/app/api/v1/engineering_graph.py:62`).
+- **Migrated** `frontend/src/app/dashboard/organization-graph/page.tsx` →
+  `InteractiveGraph` with search filter (`applyViewFilters`), neighbor
+  highlight + focus, **Timeline Diff** section (`graphApi.version`/`diff` +
+  `summarizeDiff`, per-version + added/removed lists), and **live WS** badge +
+  auto-refresh on `version_incremented`. Kept org stats cards, scope query,
+  register/link/acquire forms, and the cross-edge inspector.
+- **Deleted** `frontend/src/components/graph/ForceDirectedGraph.tsx` — sole
+  consumer migrated; duplicated registries removed.
+- **New** `frontend/src/lib/graph/orgGraphModel.test.ts` — 10 tests.
+
+**Validation:** frontend vitest **49 passed (7 files)** — 39 existing + 10 new;
+`next build` EXIT=0 (18 routes, types + lint clean). Backend untouched (D is
+pure frontend). Docs updated: `workflow-status/PHASE20_ROADMAP.md` §D ✅,
+`AGENTS.md` Session 36. `.ai-memory/` created at workspace root.
+
+**Next:** Phase 20B — B1 (billing on the Gemini key or Vertex AI) still needs a
+user infra decision; all unblocked B slices (B2, B3) are done. Then workstream E
+(extra test-framework parsers). Workstream C (live E2E) re-runs after a Gemini
+quota reset.
 
 
