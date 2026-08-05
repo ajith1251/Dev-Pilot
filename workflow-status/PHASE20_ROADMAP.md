@@ -134,7 +134,17 @@ Close the execution gap on top of the org graph.
 - **B1.** Billing on the Gemini key or **Vertex AI** (IAM, no training) — infra
   decision, needs user action (recommendation 3).
 - **B2.** Typed fallback lists per capability
-  (`DEVPILOT_LLM_PROVIDER_FALLBACKS`, `MULTI_PROVIDER_ROUTING.md` §9).
+  (`DEVPILOT_LLM_PROVIDER_FALLBACKS`, `MULTI_PROVIDER_ROUTING.md` §2.7).
+  **✅ DONE (Session 34):** `Capability` enum (analysis/planning/coding/testing/
+  review/reasoning/general), `LLMConfig.capability` field, `LLM_PROVIDER_FALLBACKS`
+  config field + validator (parses `cap:prov1,prov2;cap2:prov3` or JSON dict),
+  `ProviderRouter._priority_for`/`_ordered_entries(capability)` authoritative
+  typed chains (no leakage into the global list; no viable typed provider →
+  `ProviderNotAvailableError`), capability-only providers registered for
+  health/circuit/observability, all 7 agent stages label their calls, snapshots
+  expose `provider_fallbacks` (and real `provider_priority` names). 12 new tests
+  (7 router capability + 4 config parsing + 1 planner wiring); full suite
+  **1667 passed / 18 skipped / 1 pre-existing env failure**.
 - **B3.** Mid-stream token-loss failover (resend prompt with full prefix) for long
   generations.
 
@@ -199,7 +209,8 @@ Close the execution gap on top of the org graph.
 ## 6. Next
 
 **Phase 20B hardening** (production reliability): B1 needs a user infra decision
-(billing on the Gemini key or Vertex AI); B2 typed fallback lists per capability;
-B3 mid-stream token-loss failover. Then workstream D (org-graph UI parity on the
-React Flow engine) and E (extra test-framework parsers). Workstream C (live E2E)
-re-runs after a Gemini quota reset.
+(billing on the Gemini key or Vertex AI); B3 mid-stream token-loss failover is
+the remaining unblocked B slice (B2 typed per-capability fallback chains
+**✅ DONE Session 34**). Then workstream D (org-graph UI parity on the React Flow
+engine) and E (extra test-framework parsers). Workstream C (live E2E) re-runs
+after a Gemini quota reset.

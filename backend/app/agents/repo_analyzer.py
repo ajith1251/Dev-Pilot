@@ -265,7 +265,7 @@ class RepositoryAnalyzerAgent(BaseAgent[RepositoryAnalysisInput, RepositoryAnaly
         try:
             response = await provider.chat(
                 messages,
-                config=LLMConfig(temperature=0.2, max_tokens=1024),
+                config=LLMConfig(temperature=0.2, max_tokens=1024, capability="analysis"),
             )
 
             content = response.content.strip()

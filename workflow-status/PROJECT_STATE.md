@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 33 — Phase 20 slice A6: dashboard aux-repo surface)
-> **Current Phase**: Phase 20 (slices A1+A2+A3+A4+A5+A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card; next Phase 20B hardening). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1655 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). `scripts/demo_phase20.py` demos A–G ALL PASS.
+> **Last updated**: August 5, 2026 (session 34 — Phase 20B slice B2: typed per-capability provider fallback chains)
+> **Current Phase**: Phase 20B (B2 DONE: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list, Session 34; B1 billing/Vertex AI needs a user infra decision; B3 mid-stream token-loss failover next). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1667 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **12 new tests** — 7 router capability fallbacks + 4 config parsing (`test_provider_router.py`, 54 total) + 1 planner capability wiring (`test_planner.py`). `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2271,9 +2271,69 @@ pre-existing env failure** (`test_wrapper_skips_cleanly_without_provider`);
 frontend vitest **39/39** (6 files); `next build` EXIT=0;
 `scripts/demo_phase20.py` demos A–G ALL PASS against live PG.
 
-**Next:** Phase 20B hardening — B1 (billing/Vertex AI) needs a user infra
-decision, B2 typed fallback lists per capability, B3 mid-stream token-loss
-failover; then workstream D (org-graph UI parity on the React Flow engine) and
-E (extra test-framework parsers); workstream C live E2E after a Gemini quota
-reset.
+### Session 34 (August 5, 2026) — Phase 20B slice B2: Typed Per-Capability Provider Fallback Chains 🚀
+
+First slice of Phase 20B (production reliability): typed fallback lists per
+capability (`DEVPILOT_LLM_PROVIDER_FALLBACKS`). Today the router has ONE global
+priority chain (`PROVIDER_PRIORITY`), so a coding-generation failure can fall
+back to a model unfit for long output. B2 lets each agent stage route through
+its OWN provider chain.
+
+**Capability model:**
+
+- `Capability` enum (`app/llm/router.py`): `analysis`, `planning`, `coding`,
+  `testing`, `review`, `reasoning`, `general` (canonical order for the entry
+  union).
+- `LLMConfig.capability` field (`app/llm/base.py`) — a plain dataclass field
+  ignored by providers; the router reads it from `config.capability` or the
+  explicit `chat(..., capability=...)` kwarg. No provider signature changes, so
+  routing-disabled mode stays fully compatible.
+- `Settings.LLM_PROVIDER_FALLBACKS` (`app/config.py`) + validator parsing
+  `cap:prov1,prov2;cap2:prov3` (also `=` separators, JSON dict, mixed case —
+  all lower-cased; empty segments dropped).
+
+**Router enforcement (`app/llm/router.py`):**
+
+- `_fallbacks()` / `_priority_for()` / `_candidate_names()` / `_ordered_entries(capability)`
+  — a configured capability chain is **authoritative** for that kind of call:
+  failover only walks its providers, never the global list. Unlabelled calls and
+  capabilities without an override keep the global `PROVIDER_PRIORITY`. A typed
+  chain with no viable provider raises `ProviderNotAvailableError` (no silent
+  leakage into the global list).
+- `_build_entries()` registers the **union** of global + all capability chains,
+  so a provider referenced only in a capability chain still gets
+  health/circuit/metrics observability.
+- `chat_stream` honours the typed chain before the first token (mid-stream
+  failures unchanged).
+- `config_snapshot()` now exposes `provider_fallbacks` and the real
+  `provider_priority` names (moved out of the generic redactor, which was
+  masking every string inside lists — provider names are not secrets).
+
+**Agent wiring (all 7 stages label their calls):** repo_analyzer +
+issue_analyzer → `analysis`, planner → `planning`, coding_agent + fix_agent →
+`coding`, test_agent → `testing`, reviewer → `review`.
+
+**Tests (12 new):** `TestCapabilityFallbacks` (7) — typed chain skips the
+global priority, `config.capability` selects the chain, unlabelled calls keep
+the global chain, capability does not leak into global, streaming uses the
+typed chain, capability-only providers are registered + health-monitored,
+`config_snapshot` exposes `provider_fallbacks`; `TestProviderFallbacksConfig`
+(4) — env-string parsing, `=` separators, empty values, case normalisation;
+`TestPlannerAgent.test_plan_call_uses_planning_capability` (1) — the planner
+passes `capability="planning"` in its `LLMConfig`.
+
+**Validation:** `test_provider_router.py` now 54 tests, all targeted agent
+suites (coding/issue_analyzer/repair/agent-graph-integration/llm_providers)
+187 passed; full deterministic suite (`-m "not live"`) **1667 passed / 18
+skipped / 1 failed** (only the pre-existing
+`test_wrapper_skips_cleanly_without_provider` env quirk). Docs updated:
+`docs/MULTI_PROVIDER_ROUTING.md` §2.7 (typed fallbacks) + §9 future directions,
+`backend/.env.example`, `README.md` (Phase 20B blurb + test counts),
+`workflow-status/PHASE20_ROADMAP.md` (B2 ✅).
+
+**Next:** Phase 20B — B3 mid-stream token-loss failover (resend prompt with
+full prefix) is the remaining unblocked B slice; B1 (billing on the Gemini key
+or Vertex AI) still needs a user infra decision. Then workstream D (org-graph UI
+parity on the React Flow engine) and E (extra test-framework parsers).
+
 

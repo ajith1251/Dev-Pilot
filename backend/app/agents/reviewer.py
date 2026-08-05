@@ -218,6 +218,7 @@ class ReviewerAgent(BaseAgent[ReviewerAgentInput, AgentReview]):
                 model=self._model,
                 temperature=0.2,
                 max_tokens=4096,
+                capability="review",
             )
             response: LLMResponse = await provider.chat(
                 messages=messages,

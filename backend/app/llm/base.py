@@ -33,6 +33,12 @@ class LLMConfig:
     top_p: float = 1.0
     stop: Optional[List[str]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+    capability: Optional[str] = None
+    """Routing capability (Phase 20B): e.g. 'analysis', 'planning', 'coding',
+    'testing', 'review', 'reasoning', 'general'. When the ProviderRouter is
+    enabled and ``DEVPILOT_LLM_PROVIDER_FALLBACKS`` defines a chain for this
+    capability, the call is routed through that typed chain instead of the
+    global ``DEVPILOT_PROVIDER_PRIORITY``. Providers ignore the field."""
 
 
 @dataclass

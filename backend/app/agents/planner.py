@@ -216,7 +216,7 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
 
             response = await provider.chat(
                 messages,
-                config=LLMConfig(temperature=0.1, max_tokens=4096),
+                config=LLMConfig(temperature=0.1, max_tokens=4096, capability="planning"),
             )
 
             raw = response.content.strip()

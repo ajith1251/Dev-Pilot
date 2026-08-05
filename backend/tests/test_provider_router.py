@@ -88,6 +88,7 @@ def _make_settings(**overrides) -> SimpleNamespace:
         LLM_PROVIDER="gemini",
         LLM_MODEL="gpt-4o-mini",
         PROVIDER_PRIORITY=[],
+        LLM_PROVIDER_FALLBACKS={},
         PROVIDER_TIMEOUT_SECONDS=10,
         PROVIDER_RETRY_MAX=2,
         PROVIDER_RETRY_BASE_BACKOFF_SECONDS=0.5,
@@ -480,6 +481,201 @@ class TestRouterStreaming:
         with pytest.raises(LLMError):
             chunks = [c async for c in r.chat_stream(_msg())]
             assert chunks  # pragma: no cover
+
+
+class TestCapabilityFallbacks:
+    """Phase 20B — typed per-capability provider fallback chains."""
+
+    def _router(self, settings=None, providers=None, **kwargs) -> ProviderRouter:
+        settings = settings or _make_settings()
+        providers = providers or {}
+        return ProviderRouter(
+            factory=_StubFactory(providers),
+            settings=settings,
+            sleep=asyncio.sleep,
+            **kwargs,
+        )
+
+    def _settings_with_fallbacks(self, fallbacks, **overrides) -> SimpleNamespace:
+        return _make_settings(
+            PROVIDER_PRIORITY=["gemini", "openai", "anthropic", "fake"],
+            LLM_PROVIDER_FALLBACKS=fallbacks,
+            **overrides,
+        )
+
+    @pytest.mark.asyncio
+    async def test_typed_chain_skips_global_priority(self) -> None:
+        # Global order is gemini→openai→anthropic, but the 'coding' chain is
+        # gemini→anthropic. When gemini fails, coding must skip openai and go
+        # straight to anthropic.
+        class _RateLimited(Exception):
+            code = 429
+
+        async def _boom(messages, config=None):
+            raise _RateLimited("rate limit hit")
+
+        primary = _StubProvider("gemini", handler=_boom)
+        openai = _StubProvider("openai")
+        anthropic = _StubProvider("anthropic")
+        r = self._router(
+            settings=self._settings_with_fallbacks(
+                {"coding": ["gemini", "anthropic"]}, PROVIDER_RETRY_MAX=0,
+            ),
+            providers={
+                "gemini": primary, "openai": openai, "anthropic": anthropic,
+            },
+        )
+        result = await r.chat(_msg(), capability="coding")
+        assert result.content == "reply-anthropic"
+        assert r.active_provider == "anthropic"
+        assert openai.calls == 0  # never tried for a coding call
+
+    @pytest.mark.asyncio
+    async def test_config_capability_selects_typed_chain(self) -> None:
+        class _RateLimited(Exception):
+            code = 429
+
+        async def _boom(messages, config=None):
+            raise _RateLimited("rate limit hit")
+
+        primary = _StubProvider("gemini", handler=_boom)
+        openai = _StubProvider("openai")
+        anthropic = _StubProvider("anthropic")
+        r = self._router(
+            settings=self._settings_with_fallbacks(
+                {"planning": ["gemini", "anthropic"]}, PROVIDER_RETRY_MAX=0,
+            ),
+            providers={
+                "gemini": primary, "openai": openai, "anthropic": anthropic,
+            },
+        )
+        result = await r.chat(_msg(), config=LLMConfig(capability="planning"))
+        assert result.content == "reply-anthropic"
+        assert openai.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_unlabelled_call_keeps_global_chain(self) -> None:
+        # Without a capability, the same config falls back along the global
+        # priority (gemini→openai), proving scoping is opt-in per call.
+        class _RateLimited(Exception):
+            code = 429
+
+        async def _boom(messages, config=None):
+            raise _RateLimited("rate limit hit")
+
+        primary = _StubProvider("gemini", handler=_boom)
+        openai = _StubProvider("openai")
+        anthropic = _StubProvider("anthropic")
+        r = self._router(
+            settings=self._settings_with_fallbacks(
+                {"coding": ["gemini", "anthropic"]}, PROVIDER_RETRY_MAX=0,
+            ),
+            providers={
+                "gemini": primary, "openai": openai, "anthropic": anthropic,
+            },
+        )
+        result = await r.chat(_msg())
+        assert result.content == "reply-openai"
+        assert anthropic.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_capability_does_not_leak_into_global(self) -> None:
+        # 'coding' chain names only openai, which is unconfigured → the coding
+        # call raises even though gemini (global primary) is healthy.
+        settings = self._settings_with_fallbacks(
+            {"coding": ["openai"]},
+            OPENAI_API_KEY="",
+        )
+        r = self._router(settings=settings, providers={"gemini": _StubProvider("gemini")})
+        with pytest.raises(ProviderNotAvailableError):
+            await r.chat(_msg(), capability="coding")
+
+        # The same router happily serves unlabelled calls via gemini.
+        result = await r.chat(_msg())
+        assert result.content == "reply-gemini"
+
+    @pytest.mark.asyncio
+    async def test_stream_uses_typed_chain_before_first_token(self) -> None:
+        async def _boom(messages, config=None):
+            raise Exception("connection refused")
+            yield  # pragma: no cover
+
+        primary = _StubProvider("gemini", handler=_boom)
+        openai = _StubProvider("openai")
+        anthropic = _StubProvider("anthropic")
+        r = self._router(
+            settings=self._settings_with_fallbacks(
+                {"review": ["gemini", "anthropic"]},
+            ),
+            providers={
+                "gemini": primary, "openai": openai, "anthropic": anthropic,
+            },
+        )
+        chunks = [c async for c in r.chat_stream(_msg(), capability="review")]
+        assert chunks == ["chunk-anthropic"]
+        assert openai.calls == 0
+
+    def test_capability_only_provider_is_registered(self) -> None:
+        # anthropic appears only in the 'planning' chain, not the global
+        # priority — it must still get an entry (health/circuit/observability).
+        settings = _make_settings(
+            PROVIDER_PRIORITY=["gemini", "openai"],
+            LLM_PROVIDER_FALLBACKS={"planning": ["anthropic", "gemini"]},
+        )
+        r = self._router(settings=settings, providers={
+            "gemini": _StubProvider("gemini"),
+            "openai": _StubProvider("openai"),
+            "anthropic": _StubProvider("anthropic"),
+        })
+        names = [e.name for e in r.entries]
+        assert "anthropic" in names
+        snap = r.health_snapshot()
+        assert any(p["name"] == "anthropic" for p in snap["providers"])
+
+    def test_config_snapshot_exposes_fallbacks(self) -> None:
+        r = self._router(settings=_make_settings(
+            LLM_PROVIDER_FALLBACKS={"planning": ["anthropic", "gemini"]},
+        ))
+        cfg = r.config_snapshot()
+        assert cfg["provider_fallbacks"] == {
+            "planning": ["anthropic", "gemini"],
+        }
+
+
+class TestProviderFallbacksConfig:
+    """Parsing of DEVPILOT_LLM_PROVIDER_FALLBACKS into Settings."""
+
+    def test_env_string_parses_capabilities(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_LLM_PROVIDER_FALLBACKS=(
+                "planning:anthropic,gemini;coding:gemini,openai;review:gemini"
+            )
+        )
+        assert s.LLM_PROVIDER_FALLBACKS == {
+            "planning": ["anthropic", "gemini"],
+            "coding": ["gemini", "openai"],
+            "review": ["gemini"],
+        }
+
+    def test_equals_separator_and_empty_segments_dropped(self) -> None:
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS="coding=gemini,openai;;;")
+        assert s.LLM_PROVIDER_FALLBACKS == {"coding": ["gemini", "openai"]}
+
+    def test_empty_value_yields_empty_dict(self) -> None:
+        from app.config import Settings
+
+        assert Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS="").LLM_PROVIDER_FALLBACKS == {}
+        assert Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS=None).LLM_PROVIDER_FALLBACKS == {}
+
+    def test_case_normalized(self) -> None:
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS="Coding:GEMINI,OpenAI")
+        assert s.LLM_PROVIDER_FALLBACKS == {"coding": ["gemini", "openai"]}
 
 
 class TestRouterObservability:

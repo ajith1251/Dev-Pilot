@@ -141,7 +141,7 @@ class CodingAgent(BaseAgent[CodingAgentInput, CodingAgentOutput]):
 
         # Call LLM using the provider-independent interface
         messages = [LLMMessage(role="user", content=prompt)]
-        config = LLMConfig(model=self._model, temperature=0.3, max_tokens=8192)
+        config = LLMConfig(model=self._model, temperature=0.3, max_tokens=8192, capability="coding")
         response: LLMResponse = await self._get_provider().chat(
             messages=messages,
             config=config,

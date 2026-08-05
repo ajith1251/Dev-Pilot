@@ -168,6 +168,25 @@ class TestPlannerAgent:
         assert plan.documentation_impact
 
     @pytest.mark.asyncio
+    async def test_plan_call_uses_planning_capability(self, agent: PlannerAgent) -> None:
+        """Planning calls are labelled capability='planning' so the router can
+        apply a typed fallback chain for the stage."""
+        requirements = make_valid_requirements()
+        inp = PlannerInput(requirements=requirements)
+
+        with patch("app.agents.planner.llm_factory") as mock_factory:
+            mock_provider = AsyncMock()
+            mock_provider.chat = AsyncMock(
+                return_value=MagicMock(content=VALID_PLAN_JSON)
+            )
+            mock_factory.get_provider = MagicMock(return_value=mock_provider)
+
+            await agent.execute(inp)
+
+        config = mock_provider.chat.call_args.kwargs["config"]
+        assert config.capability == "planning"
+
+    @pytest.mark.asyncio
     async def test_no_requirements_returns_error(self, agent: PlannerAgent) -> None:
         """No requirements should return an error."""
         requirements = StructuredRequirements(

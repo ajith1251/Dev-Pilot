@@ -180,6 +180,7 @@ class FixAgent(BaseAgent[FixAgentInput, FixAgentOutput]):
                 model=self._model,
                 temperature=0.2,
                 max_tokens=4096,
+                capability="coding",
             )
             response: LLMResponse = await provider.chat(
                 messages=messages,

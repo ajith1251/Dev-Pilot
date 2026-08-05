@@ -249,6 +249,7 @@ class TestAgent(BaseAgent[TestAgentInput, TestAgentOutput]):
                 model=self._model,
                 temperature=0.2,
                 max_tokens=2048,
+                capability="testing",
             )
             response: LLMResponse = await provider.chat(
                 messages=messages,

@@ -81,6 +81,29 @@ class FailureKind(enum.Enum):
     UNKNOWN = "unknown"        # conservative → retryable
 
 
+class Capability(enum.Enum):
+    """Routing capabilities (Phase 20B) — typed per-capability fallback chains.
+
+    Each agent stage labels its calls with a capability so the router can
+    scope failover to the provider chain configured for that kind of work
+    (``DEVPILOT_LLM_PROVIDER_FALLBACKS``). ``GENERAL`` is the fallback for
+    unlabelled calls (CLI chat, API probes).
+    """
+
+    ANALYSIS = "analysis"    # repo_analyzer, issue_analyzer
+    PLANNING = "planning"    # planner
+    CODING = "coding"        # coding_agent, fix_agent (long generation)
+    TESTING = "testing"      # test_agent
+    REVIEW = "review"        # reviewer
+    REASONING = "reasoning"  # collaborative reasoning / consensus
+    GENERAL = "general"      # everything unlabelled
+
+    @classmethod
+    def names(cls) -> List[str]:
+        """Canonical capability order (deterministic union ordering)."""
+        return [c.value for c in cls]
+
+
 RETRYABLE_KINDS = {
     FailureKind.RATE_LIMIT,
     FailureKind.TIMEOUT,
@@ -526,6 +549,60 @@ class ProviderRouter:
             return configured
         return self._default_priority()
 
+    def _fallbacks(self) -> Dict[str, List[str]]:
+        """Per-capability typed provider chains (Phase 20B).
+
+        Read defensively so a settings stub without the field (unit tests,
+        older configs) degrades to no overrides.
+        """
+        raw = getattr(self._settings, "LLM_PROVIDER_FALLBACKS", None) or {}
+        out: Dict[str, List[str]] = {}
+        for cap, names in raw.items():
+            cap_key = str(cap).strip().lower()
+            if not cap_key:
+                continue
+            items = [str(n).strip().lower() for n in names if str(n).strip()]
+            if items:
+                out[cap_key] = items
+        return out
+
+    def _priority_for(self, capability: Optional[str]) -> Optional[List[str]]:
+        """Typed chain for a capability, else None (use the global list)."""
+        if not capability:
+            return None
+        cap_key = str(capability).strip().lower()
+        return self._fallbacks().get(cap_key)
+
+    def _candidate_names(self, capability: Optional[str]) -> List[str]:
+        """Provider names tried for a call, in priority order.
+
+        A configured capability chain is authoritative: calls of that kind
+        only fall through providers in its list (a typed fallback instead of
+        the global ``DEVPILOT_PROVIDER_PRIORITY``). Unlabelled calls and
+        capabilities without an override keep the global chain.
+        """
+        cap_list = self._priority_for(capability)
+        if cap_list is not None:
+            return cap_list
+        return self._priority()
+
+    def _all_priority_names(self) -> List[str]:
+        """Union of the global chain and every capability chain.
+
+        Keeps providers that appear ONLY in a capability fallback registered
+        with the router (so they get health tracking, circuit breakers and
+        observability) even when the global priority excludes them.
+        """
+        names: List[str] = []
+        for name in list(self._priority()):
+            if name not in names:
+                names.append(name)
+        for cap in Capability.names():
+            for name in self._fallbacks().get(cap, []):
+                if name not in names:
+                    names.append(name)
+        return names
+
     def _provider_configured(self, name: str) -> bool:
         if name == "fake":
             return True
@@ -538,7 +615,7 @@ class ProviderRouter:
     def _build_entries(self) -> List[ProviderEntry]:
         entries: List[ProviderEntry] = []
         seen = set()
-        for priority, name in enumerate(self._priority()):
+        for priority, name in enumerate(self._all_priority_names()):
             if name in seen:
                 continue
             seen.add(name)
@@ -564,12 +641,21 @@ class ProviderRouter:
             entries.append(entry)
         return entries
 
-    def _ordered_entries(self) -> List[ProviderEntry]:
-        """Configured, enabled, circuit-not-open entries in priority order."""
-        return [
-            e for e in sorted(self.entries, key=lambda x: x.priority)
-            if e.configured and e.enabled and not e.breaker.is_circuit_open()
-        ]
+    def _ordered_entries(self, capability: Optional[str] = None) -> List[ProviderEntry]:
+        """Configured, enabled, circuit-not-open entries in candidate order.
+
+        The candidate set is the typed capability chain when one is configured
+        for ``capability``, otherwise the global priority list — so per-call
+        failover respects the capability's chain.
+        """
+        by_name = {e.name: e for e in self.entries}
+        result: List[ProviderEntry] = []
+        for name in self._candidate_names(capability):
+            entry = by_name.get(name)
+            if entry is not None and entry.configured and entry.enabled \
+                    and not entry.breaker.is_circuit_open():
+                result.append(entry)
+        return result
 
     def _set_active(self, name: str) -> None:
         self._active_provider = name
@@ -629,13 +715,21 @@ class ProviderRouter:
         self,
         messages: List[LLMMessage],
         config: Optional[LLMConfig] = None,
+        capability: Optional[str] = None,
     ) -> LLMResponse:
-        """Route a chat call with health-aware selection + automatic failover."""
-        entries = self._ordered_entries()
+        """Route a chat call with health-aware selection + automatic failover.
+
+        ``capability`` (or ``config.capability``) selects the typed fallback
+        chain configured via ``DEVPILOT_LLM_PROVIDER_FALLBACKS`` when one
+        exists; otherwise the global priority chain is used.
+        """
+        cap = capability or (getattr(config, "capability", None) if config is not None else None)
+        entries = self._ordered_entries(cap)
         if not entries:
             raise ProviderNotAvailableError(
-                "No provider is configured and circuit-healthy. "
-                "Set an API key and (optionally) DEVPILOT_PROVIDER_PRIORITY."
+                "No provider is configured and circuit-healthy for the request. "
+                "Set an API key and (optionally) DEVPILOT_PROVIDER_PRIORITY or "
+                "DEVPILOT_LLM_PROVIDER_FALLBACKS."
             )
 
         failures: List[Dict[str, str]] = []
@@ -669,13 +763,16 @@ class ProviderRouter:
         self,
         messages: List[LLMMessage],
         config: Optional[LLMConfig] = None,
+        capability: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """Stream a chat call with failover only before the first token.
 
         A failure mid-stream (after tokens have been yielded) is surfaced as
         an error rather than retried — retrying would duplicate tokens.
+        ``capability``/``config.capability`` select the typed fallback chain.
         """
-        entries = self._ordered_entries()
+        cap = capability or (getattr(config, "capability", None) if config is not None else None)
+        entries = self._ordered_entries(cap)
         if not entries:
             raise ProviderNotAvailableError(
                 "No provider is configured and circuit-healthy."
@@ -779,9 +876,8 @@ class ProviderRouter:
                 "configured": bool(value) or name == "fake",
                 "key": redact_secret(str(value)) if value else "<not set>",
             }
-        return redact_dict({
+        snapshot = redact_dict({
             "routing_enabled": bool(self._settings.PROVIDER_ROUTING_ENABLED),
-            "provider_priority": self._priority(),
             "timeout_seconds": self._timeout_seconds,
             "retry": self._retry.snapshot(),
             "circuit_breaker": {
@@ -798,6 +894,13 @@ class ProviderRouter:
             },
             "providers": availability,
         })
+        # Provider names are not secrets — expose them verbatim (the generic
+        # redactor masks every string inside lists).
+        snapshot["provider_priority"] = self._priority()
+        snapshot["provider_fallbacks"] = {
+            cap: list(names) for cap, names in self._fallbacks().items()
+        }
+        return snapshot
 
     def snapshot(self) -> Dict[str, Any]:
         return {

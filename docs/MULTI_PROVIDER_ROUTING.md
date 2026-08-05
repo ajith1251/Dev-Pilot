@@ -138,7 +138,38 @@ that recovered stops looking unhealthy.
 Also tracked: latency exponential moving average, last success/failure time,
 uptime, per-provider retries and failover counters.
 
-### 2.7 Streaming failover
+### 2.7 Typed per-capability fallbacks (Phase 20B)
+
+`PROVIDER_PRIORITY` is one global chain for every call. Phase 20B adds
+**per-capability typed chains** so a stage like *coding* (long generation,
+big context) can fall back along a different provider list than *analysis*
+(short, cheap classifications):
+
+```dotenv
+DEVPILOT_LLM_PROVIDER_FALLBACKS=coding:gemini,openai;planning:anthropic,gemini
+```
+
+- **Format**: `capability:prov1,prov2;capability2:prov3` (also accepts `=`
+  separators, a JSON dict, or mixed case — all normalised to lowercase).
+- **Capabilities**: `analysis`, `planning`, `coding`, `testing`, `review`,
+  `reasoning`, `general`. Each agent stage labels its calls: repo/issue
+  analyzers → `analysis`, planner → `planning`, coding + fix agents → `coding`,
+  test agent → `testing`, reviewer → `review`.
+- **Semantics**: a configured capability chain is **authoritative** for that
+  kind of call — failover only walks providers in the chain, never the global
+  list. Unlabelled calls (CLI chat, API probes) and capabilities without an
+  override keep the global `PROVIDER_PRIORITY`. If no provider in the typed
+  chain is configured/circuit-healthy the router raises
+  `ProviderNotAvailableError` — it does not silently leak into the global list.
+- **Capability transport**: `LLMConfig.capability` (a plain field, ignored by
+  providers). The router reads it from `config.capability` or the explicit
+  `chat(..., capability=...)` kwarg.
+- **Observability**: providers referenced only in a capability chain are still
+  registered (health, circuit breakers, metrics) even when excluded from the
+  global priority. `GET /api/v1/providers/config` and the CLI expose
+  `provider_fallbacks` alongside `provider_priority`.
+
+### 2.8 Streaming failover
 
 `chat_stream` failover happens **before the first token**. If a provider
 errors before yielding any content it is treated like a failed call (classified
@@ -146,7 +177,7 @@ errors before yielding any content it is treated like a failed call (classified
 abandoned mid-flight — swapping providers mid-stream would corrupt output, so
 the error is surfaced to the caller instead.
 
-### 2.8 Failure contract — never silent
+### 2.9 Failure contract — never silent
 
 When every provider fails, the router raises `AllProvidersFailedError` carrying
 a `failures` list — one `ProviderCallFailedError` per provider attempt with its
@@ -154,7 +185,7 @@ a `failures` list — one `ProviderCallFailedError` per provider attempt with it
 **why**. Router exceptions live in `app/core/exceptions.py` and are surfaced
 (503) by the `/api/v1/providers/test` endpoint and the `provider-test` CLI.
 
-### 2.9 Redaction
+### 2.10 Redaction
 
 `app/llm/redaction.py` recursively redacts secrets from any snapshot/dict
 before it leaves the backend: keys named like `api_key`, `token`, `secret`,
@@ -295,9 +326,9 @@ live-Gemini durability tests that require a fresh free-tier quota key.
 
 ## 9. Future directions
 
-- **Cross-provider failover config** (`DEVPILOT_LLM_PROVIDER_FALLBACKS`) is
-  now *partially* addressed by `PROVIDER_PRIORITY` — a natural next step is
-  typed fallback lists per capability.
+- **Typed per-capability fallback lists** (`DEVPILOT_LLM_PROVIDER_FALLBACKS`)
+  — **✅ DONE (Phase 20B, Session 34):** each agent stage routes through its
+  own provider chain via `LLMConfig.capability`; see §2.7.
 - Billing/Vertex AI path for production-grade Gemini reliability.
 - Mid-stream token-loss failover (resend prompt with full prefix) for long
   generations.

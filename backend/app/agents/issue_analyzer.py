@@ -211,7 +211,7 @@ class IssueAnalyzerAgent(BaseAgent[IssueAnalysisInput, IssueAnalysisOutput]):
 
         response = await provider.chat(
             messages,
-            config=LLMConfig(temperature=0.1, max_tokens=2048),
+            config=LLMConfig(temperature=0.1, max_tokens=2048, capability="analysis"),
         )
 
         raw = response.content.strip()

@@ -8,7 +8,7 @@ and .env files. Never hard-code secrets.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -223,6 +223,16 @@ class Settings(BaseSettings):
                     "'gemini,openai,anthropic,fake'. When empty the router "
                     "uses [LLM_PROVIDER] followed by every available provider.",
     )
+    LLM_PROVIDER_FALLBACKS: Dict[str, List[str]] = Field(
+        default={}, alias="DEVPILOT_LLM_PROVIDER_FALLBACKS",
+        description="Per-capability typed provider fallback chains, e.g. "
+                    "'planning:anthropic,gemini;coding:gemini,openai'. Each "
+                    "capability (analysis|planning|coding|testing|review|"
+                    "reasoning|general) restricts which providers are tried "
+                    "for calls of that kind instead of the global "
+                    "PROVIDER_PRIORITY. Calls without a capability keep the "
+                    "global chain.",
+    )
     PROVIDER_TIMEOUT_SECONDS: float = Field(
         default=60.0, ge=1.0, le=600.0,
         alias="DEVPILOT_PROVIDER_TIMEOUT_SECONDS",
@@ -291,6 +301,42 @@ class Settings(BaseSettings):
         if isinstance(v, (list, tuple)):
             return [str(p).strip().lower() for p in v if str(p).strip()]
         return [str(v)]
+
+    @field_validator("LLM_PROVIDER_FALLBACKS", mode="before")
+    @classmethod
+    def validate_provider_fallbacks(cls, v) -> Dict[str, List[str]]:
+        """Accept a 'cap:prov1,prov2;cap2:prov3' env string or a JSON dict.
+
+        Keys are lower-cased capability names; values are lower-cased,
+        de-duplicated provider names in priority order. Empty entries and
+        malformed segments are dropped.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            out: Dict[str, List[str]] = {}
+            for cap, names in v.items():
+                items = [
+                    str(n).strip().lower() for n in str(names).split(",") if str(n).strip()
+                ]
+                if str(cap).strip() and items:
+                    out[str(cap).strip().lower()] = items
+            return out
+        if isinstance(v, str):
+            out = {}
+            for chunk in v.split(";"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                sep = ":" if ":" in chunk else ("=" if "=" in chunk else None)
+                if sep is None:
+                    continue
+                cap, _, names = chunk.partition(sep)
+                items = [n.strip().lower() for n in names.split(",") if n.strip()]
+                if cap.strip() and items:
+                    out[cap.strip().lower()] = items
+            return out
+        return {}
 
     @field_validator("TEST_DEFAULT_TIMEOUT")
     @classmethod
