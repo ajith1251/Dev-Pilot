@@ -1,6 +1,6 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: IN PROGRESS — slices A1–A4 DONE (Sessions 28–31), A5 next
+> **Status**: IN PROGRESS — slices A1–A5 DONE (Sessions 28–32), A6 next
 > **Date**: August 5, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
 > knowledge layer (EKG + organization graph) is now **cross-repository**, but the
@@ -85,6 +85,25 @@ Close the execution gap on top of the org graph.
 - **A5. Per-repo EKG ingestion** — `record_run` already stamps `repository_id`;
   ensure cross-repo runs ingest their patches into each repo's namespace and link
   the run across namespaces via the org graph.
+  **✅ DONE (Session 32):**
+  `OrganizationKnowledgeGraphService.record_run_across_namespaces(run,
+  reasoning_outcome=None)` — shared evidence via the org-level graph's
+  `record_run`, then each per-repo patch result is ingested into ITS OWN repo
+  namespace (`_ingest_run_into_repository_namespace`: RUN + REPOSITORY + PATCH +
+  FILE nodes, REFERENCES RUN→REPO / RUN→PATCH + MODIFIES PATCH→FILE edges,
+  PATCH payload carries `files_changed`/`files`/`validation_status`/
+  `application_status`/`changes_applied`/`changes_attempted`), then org-level
+  REFERENCES edges link the RUN node to each involved repo node
+  (`_link_run_to_repositories`, cross-namespace edge target id like
+  `REPO::repo-b`). Orchestrator `_ingest_into_graph` delegates to
+  `record_run_across_namespaces` for any cross-repo run (per-repo patches, source
+  `repo_patches`, or `auxiliary_repositories`); single-repo runs fall back to
+  `record_run`. `RepositoryPatchResult.changed_files` added and populated
+  (`[c.path for c in patch.changes]`). Fixed pre-existing latent bug:
+  `_validate_single_repo_patch` never `await`ed `_enrich_patch_hashes`
+  (per-repo MODIFY/DELETE always rejected). 13 new tests
+  (`tests/test_phase20_repo_ingestion.py`); `scripts/demo_phase20.py` demo G
+  (per-repo ingest evidence) added, demos A–G ALL PASS.
 - **A6. API/CLI/frontend** — `POST /api/v1/runs` + `python -m app.cli run`
   accept `repositories`; dashboard run form exposes optional aux repos.
 
@@ -121,7 +140,7 @@ Close the execution gap on top of the org graph.
 | Order | Slice | Why first |
 |---|---|---|
 | 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked — **✅ DONE (Session 28)** |
-| 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, A5 next |
+| 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, **A5 ✅ DONE (Session 32)** |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
 | 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — API/CLI already accept `repositories` (done with A1/A2); remaining: dashboard run form |
 | 5 | B/D/E | hardening + polish (B1 needs a user infra decision) |
@@ -147,7 +166,8 @@ Close the execution gap on top of the org graph.
   **✅ A1+A2 covered (10 tests in `tests/test_phase20_multi_repo_run.py`);**
   **✅ A3 covered (7 tests: 3 in `test_organization_graph.py` +
   4 in `test_phase20_multi_repo_run.py`);**
-  **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`).**
+  **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`);**
+  **✅ A5 covered (13 tests in `tests/test_phase20_repo_ingestion.py`).**
 - Full deterministic suite stays green (**1640 passed / 18 skipped / 1 pre-existing
   env failure**).
-- `scripts/demo_phase20.py` demos A–F ALL PASS (deterministic, no paid LLM).
+- `scripts/demo_phase20.py` demos A–G ALL PASS (deterministic, no paid LLM).

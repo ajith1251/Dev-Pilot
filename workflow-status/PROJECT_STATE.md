@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 31 — Phase 20 slice A4: per-repo scope enforcement)
-> **Current Phase**: Phase 20 (slices A1+A2+A3+A4 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31 — `RepositoryScopeRegistry` + `SafePatchEngine` ownership gate + DET-020 + orchestrator per-repo validation/application + API/CLI `repo_patches`; next slice A5 — per-repo EKG ingestion). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1640 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **38 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`). `scripts/demo_phase20.py` demos A–F ALL PASS.
+> **Last updated**: August 5, 2026 (session 32 — Phase 20 slice A5: per-repo EKG ingestion)
+> **Current Phase**: Phase 20 (slices A1+A2+A3+A4+A5 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`; next slice A6 — dashboard run form aux repos). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1640 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **51 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 13 (`test_phase20_repo_ingestion.py`). `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2139,4 +2139,78 @@ with `repo_validation` aggregated).
 **Next:** slice A5 — per-repo EKG ingestion (`record_run` already stamps
 `repository_id`; ensure cross-repo runs ingest their patches into each repo's
 namespace and link the run across namespaces via the org graph).
+
+### Session 32 (August 5, 2026) — Phase 20 slice A5: Per-Repo EKG Ingestion 🚀
+
+Fifth slice of Phase 20: after A4 guarantees a per-repo patch is validated and
+applied only against its own checkout, A5 makes that evidence land in the
+**right** namespace of the organization graph. Before A5 a cross-repo run's
+shared evidence went to the org-level graph but the per-repo patches were not
+ingested into each repository's own knowledge namespace, so repo-scoped EKG
+queries could not see them.
+
+**New org-graph method:**
+
+- `OrganizationKnowledgeGraphService.record_run_across_namespaces(run,
+  reasoning_outcome=None)` — shared evidence first via
+  `self._org_graph.record_run(...)` (org-level namespace), then each
+  `run.repo_patches[i]` is ingested into ITS OWN repository namespace:
+  `_ingest_run_into_repository_namespace(graph, result, run_id)` adds a RUN
+  node, REPOSITORY node (`_repo_node_id(repo_id)`, e.g. `REPO::repo-b`), PATCH
+  node (payload: `files_changed`, `files`, `validation_status`,
+  `application_status`, `changes_applied`, `changes_attempted`) and FILE nodes
+  for the first 10 changed files, with REFERENCES RUN→REPO / RUN→PATCH and
+  MODIFIES PATCH→FILE edges; unregistered namespaces are skipped gracefully.
+  Auxiliary repositories that were materialized but produced no patch results
+  are still counted as involved.
+- `_link_run_to_repositories(run_id, repo_ids)` — adds org-level REFERENCES
+  edges from the RUN node to each involved repository's cross-namespace edge
+  target (`_repo_node_id(repo_id)`), linking the run across namespaces.
+- Both helpers run the same `increment_version` + node/edge/version/semantic
+  persistence used by `record_run`.
+
+**Orchestrator wiring:**
+
+- `_ingest_into_graph` now delegates to `record_run_across_namespaces` for any
+  cross-repo run (`run.repo_patches` or `run.source.repo_patches` or
+  `run.auxiliary_repositories` set); single-repo runs keep the existing
+  `graph.record_run` path. Org-graph failures fall back to the EKG record as
+  before.
+
+**Model + bug fixes:**
+
+- `RepositoryPatchResult.changed_files: List[str]` added (default `[]`) and
+  populated as `[c.path for c in patch.changes]` on both per-repo and primary
+  patch results; `summary()` now includes `changed_files[:20]`.
+- Fixed a **pre-existing latent bug**: `_validate_single_repo_patch` called the
+  async `_enrich_patch_hashes` without `await`, so per-repo MODIFY/DELETE patches
+  were always rejected (original-hash enrichment never ran). The method is now
+  `async def` and awaits the enrichment; both call sites in
+  `_stage_patch_validation` updated.
+
+**Demo + tests:**
+
+- `scripts/demo_phase20.py` gained demo G (`G_per_repo_ekg_ingestion`): runs an
+  end-to-end multi-repo `execute_run`, then asserts per-repo ingest evidence —
+  `changed_files` on results and REPO::/PATCH:: nodes + edges in each
+  repository's namespace via `acquire_run_evidence`. Demo G re-clears its
+  checkouts so re-runs are deterministic (a prior demo leaving `feature.py`
+  behind would otherwise fail the CREATE patch validation). Demos A–G ALL PASS.
+- New `tests/test_phase20_repo_ingestion.py` (13 tests): `TestChangedFilesEvidence`
+  (default, populated, summary), `TestRecordRunAcrossNamespaces` (per-repo node
+  types/edges/payload, cross-namespace RUN→REPO links, unregistered-namespace
+  skip, orphan/aux-only involvement), `TestIngestIntoGraphRouting` (single-repo
+  → `record_run`, cross-repo → `record_run_across_namespaces`, fallback on
+  org-graph failure), plus an end-to-end `execute_run` test with real aux
+  materialization asserting per-repo evidence in the aux namespace.
+
+**Validation:** A5 suite 13/13; A4+A5 34 passed; related suites (A4, A5,
+org-graph, multi-repo run, multi-repo acquisition) 108 passed with zero
+regressions. `scripts/demo_phase20.py` demos A–G ALL PASS against live PG
+(plus in-memory). `changed_files` evidence also surfaces per repo in
+`repo_validation`/`repository_validation` outputs.
+
+**Next:** slice A6 — dashboard run form exposes optional auxiliary
+repositories (API/CLI already accept `repositories`/`repo_patches` from
+A1/A2/A4; only the frontend surface remains).
 

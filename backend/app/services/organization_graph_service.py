@@ -609,6 +609,195 @@ class OrganizationKnowledgeGraphService:
                 break
         return seeded
 
+    # ── Cross-repository run ingestion (Phase 20A5) ──────────────
+
+    async def record_run_across_namespaces(
+        self,
+        run: Any,
+        reasoning_outcome: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Ingest a completed run across repository namespaces.
+
+        A cross-repository run touches the primary checkout AND one or more
+        auxiliary repositories. Calling the per-repo ``record_run`` would
+        collapse every repository's footprint into one namespace, so this
+        method orchestrates the ingestion instead:
+
+        1. Shared run evidence (goals → plan → patch → tests → review →
+           quality gate → reasoning) is recorded into the org-level graph
+           (default namespace) — exactly the enrichment a single-repo run
+           already gets from ``record_run``.
+        2. Each per-repository patch result (``run.repo_patches``) is
+           ingested into the OWNING repository's namespace: a RUN node, the
+           PATCH evidence (changed files, validation/application outcome)
+           and FILE nodes + MODIFIES edges. The same run therefore has a
+           scoped footprint in every repository it touched, queryable via
+           ``query(scope=LOCAL, repository_ids=[...])``.
+        3. The org graph links the run node to each involved repository's
+           REPOSITORY node with REFERENCES edges, so the cross-namespace
+           footprint is traversable from the org level.
+
+        Idempotent: re-ingesting the same run upserts nodes and dedups
+        edges. Never raises — graph enrichment is observability.
+        """
+        run_id = getattr(run, "run_id", "") or ""
+        if not run_id:
+            return self._org_graph.current_version()
+
+        version = await self._org_graph.record_run(
+            run, reasoning_outcome=reasoning_outcome
+        )
+
+        involved: List[str] = []
+        for result in getattr(run, "repo_patches", None) or []:
+            repo_id = getattr(result, "repository_id", "") or ""
+            if not repo_id:
+                continue
+            involved.append(repo_id)
+            graph = self._graphs.get(repo_id)
+            if graph is None:
+                logger.debug(
+                    "Per-repo EKG skip %s: namespace not registered", repo_id
+                )
+                continue
+            try:
+                await self._ingest_run_into_repository_namespace(graph, result, run_id)
+            except Exception as exc:  # pragma: no cover
+                logger.debug(
+                    "Per-repo EKG ingestion skipped for %s (non-fatal): %s",
+                    repo_id, exc,
+                )
+
+        # Auxiliary repositories materialized by the run (A2) are involved
+        # even without a per-repo patch result — the run still references
+        # them from the org level.
+        for aux in getattr(run, "auxiliary_repositories", None) or []:
+            aux_id = aux.get("repository_id", "") if isinstance(aux, dict) else ""
+            if aux_id and aux_id not in involved:
+                involved.append(aux_id)
+
+        self._link_run_to_repositories(run_id, involved)
+        return version
+
+    async def _ingest_run_into_repository_namespace(
+        self,
+        graph: Any,
+        result: Any,
+        run_id: str,
+    ) -> None:
+        """Record one repository's patch footprint inside its own namespace.
+
+        Mirrors the evidence shape of ``record_run`` (RUN/REPOSITORY/PATCH
+        nodes + REFERENCES/MODIFIES edges) but bound to the repository's
+        graph service, so stable ids fold in the namespace and persisted
+        rows stay isolated per repository.
+        """
+        repo_id = result.repository_id
+        changed_files = list(getattr(result, "changed_files", None) or [])[:20]
+        patch_id = getattr(result, "patch_id", "") or run_id
+
+        updated_nodes: List[str] = []
+        updated_edges: List[str] = []
+
+        run_node = graph.add_node(
+            EKNodeType.RUN, f"run:{run_id}", source_ref=run_id, source_type="run",
+            qualified_name=run_id,
+            payload={
+                "status": (getattr(result, "validation_status", "") or "validated"),
+                "title": f"run:{run_id}",
+                "repository": repo_id[:200],
+            },
+            provenance={"run_id": run_id, "repository_id": repo_id, "source": "orchestration"},
+        )
+        updated_nodes.append(run_node.node_id)
+
+        repo_node = graph.add_node(
+            EKNodeType.REPOSITORY, repo_id, node_id=_repo_node_id(repo_id),
+            source_ref=repo_id, source_type="repository",
+            qualified_name=repo_id,
+            payload={"repository_id": repo_id},
+            provenance={"run_id": run_id, "repository_id": repo_id, "source": "orchestration"},
+        )
+        updated_nodes.append(repo_node.node_id)
+
+        patch_node = graph.add_node(
+            EKNodeType.PATCH, f"patch:{patch_id}", source_ref=run_id, source_type="run",
+            qualified_name=f"patch:{patch_id}",
+            payload={
+                "files_changed": len(changed_files),
+                "files": changed_files,
+                "validation_status": getattr(result, "validation_status", "") or "",
+                "application_status": getattr(result, "application_status", "") or "",
+                "changes_applied": getattr(result, "changes_applied", 0) or 0,
+                "changes_attempted": getattr(result, "changes_attempted", 0) or 0,
+            },
+            provenance={"run_id": run_id, "repository_id": repo_id, "source": "coding"},
+        )
+        updated_nodes.append(patch_node.node_id)
+
+        for src, tgt, rel in (
+            (run_node.node_id, repo_node.node_id, EKRelationshipType.REFERENCES),
+            (run_node.node_id, patch_node.node_id, EKRelationshipType.REFERENCES),
+        ):
+            if graph.add_edge(src, tgt, rel, metadata={"run_id": run_id}):
+                updated_edges.append(graph._last_edge_id(src, tgt))
+
+        for fpath in changed_files[:10]:
+            file_node = graph.add_node(
+                EKNodeType.FILE, fpath.split("/")[-1], source_ref=fpath, source_type="file",
+                qualified_name=fpath,
+                payload={"path": fpath},
+                provenance={"run_id": run_id, "repository_id": repo_id, "source": "patch"},
+            )
+            updated_nodes.append(file_node.node_id)
+            if graph.add_edge(patch_node.node_id, file_node.node_id, EKRelationshipType.MODIFIES,
+                              metadata={"run_id": run_id}):
+                updated_edges.append(graph._last_edge_id(patch_node.node_id, file_node.node_id))
+
+        version = graph.increment_version(
+            run_id=run_id,
+            summary=f"Run {run_id} ingested into {repo_id} namespace",
+            updated_nodes=updated_nodes,
+            updated_edges=updated_edges,
+        )
+        await graph._persist_ingested_nodes(updated_nodes)
+        await graph._persist_ingested_edges(updated_edges)
+        await graph._persist_version(version)
+        await graph._ensure_semantic_index()
+        await graph._persist_semantic_pg(updated_nodes)
+
+    def _link_run_to_repositories(self, run_id: str, repo_ids: List[str]) -> None:
+        """Cross-namespace link: org RUN node REFERENCES each REPOSITORY node.
+
+        Edges live in the org graph (default namespace) so the run is
+        reachable from any registered repository's REPOSITORY node during
+        cross-repository traversal.
+        """
+        run_node = self._org_graph._find_run_node(run_id, EKNodeType.RUN)
+        if run_node is None:
+            return
+        updated_edges: List[str] = []
+        seen: Set[str] = set()
+        for repo_id in repo_ids:
+            if not repo_id or repo_id in seen:
+                continue
+            seen.add(repo_id)
+            repo_node_id = _repo_node_id(repo_id)
+            if self._org_graph.get_node(repo_node_id) is None:
+                continue
+            if self._org_graph.add_edge(
+                run_node.node_id, repo_node_id, EKRelationshipType.REFERENCES,
+                metadata={"run_id": run_id, "repository_id": repo_id},
+            ):
+                updated_edges.append(
+                    self._org_graph._last_edge_id(run_node.node_id, repo_node_id)
+                )
+        if updated_edges:
+            self._org_graph.increment_version(
+                summary=f"Linked run {run_id} to {len(seen)} repository namespaces",
+                updated_edges=updated_edges,
+            )
+
     def neighbors_of(self, repository_id: str) -> List[Tuple[str, EKRelationshipType]]:
         """Repositories reachable from `repository_id` + the relationship."""
         out: List[Tuple[str, str, EKRelationshipType]] = self._cross_out.get(

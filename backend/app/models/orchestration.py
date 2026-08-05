@@ -296,6 +296,11 @@ class RepositoryPatchResult(BaseModel):
     deterministic_findings: List[str] = Field(default_factory=list)
     changes_applied: int = Field(default=0, description="Number of changes successfully applied")
     changes_attempted: int = Field(default=0, description="Number of changes in the patch")
+    changed_files: List[str] = Field(
+        default_factory=list,
+        description="Relative changed file paths this patch targets (Phase 20A5 "
+                    "per-repo EKG ingestion evidence)",
+    )
     status: str = Field(
         default="ok",
         description="ok | rejected | applied | pending",
@@ -317,6 +322,7 @@ class RepositoryPatchResult(BaseModel):
             "deterministic_findings": self.deterministic_findings[:20],
             "changes_applied": self.changes_applied,
             "changes_attempted": self.changes_attempted,
+            "changed_files": self.changed_files[:20],
             "status": self.status,
         }
 

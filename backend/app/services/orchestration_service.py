@@ -721,10 +721,25 @@ class OrchestrationService:
         run: DevPilotRun,
         reasoning_outcome: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Phase 18: enrich the Engineering Knowledge Graph from a completed run.
+        """Enrich the Engineering Knowledge Graph from a completed run.
+
+        Phase 20A5: cross-repository runs (those with per-repo patch results
+        or auxiliary repositories) are ingested through the organization
+        graph so every touched repository's namespace carries its own scoped
+        footprint, linked across namespaces via the org graph.
 
         Never fatal — graph enrichment is observability; the run result stands.
         """
+        if run.repo_patches or run.source.repo_patches or run.auxiliary_repositories:
+            org = self._get_org_graph()
+            if org is not None:
+                try:
+                    await org.record_run_across_namespaces(
+                        run, reasoning_outcome=reasoning_outcome
+                    )
+                    return
+                except Exception as exc:
+                    logger.debug("Org-graph ingestion skipped (non-fatal): %s", exc)
         graph = self._get_engineering_graph()
         if graph is None:
             return
@@ -939,7 +954,7 @@ class OrchestrationService:
             return None
         return registry.resolve(repository_id)
 
-    def _validate_single_repo_patch(
+    async def _validate_single_repo_patch(
         self,
         run: DevPilotRun,
         repository_id: str,
@@ -960,7 +975,7 @@ class OrchestrationService:
         # Compute file hashes against THIS checkout so deterministic content
         # validation can proceed. Files missing in this repo stay hash-less
         # and are rejected (anti-hallucination).
-        self._enrich_patch_hashes(patch, workspace)
+        await self._enrich_patch_hashes(patch, workspace)
 
         # Tag the patch with full provenance so ownership is explicit.
         if patch.repository_id is None:
@@ -983,6 +998,7 @@ class OrchestrationService:
             originating_run_id=patch.originating_run_id or originating_run_id,
             originating_plan_id=patch.plan_id or originating_plan_id,
             changes_attempted=len(patch.changes),
+            changed_files=[c.path for c in patch.changes],
         )
 
         # Phase 20A4: ownership + path-containment gate. This is the
@@ -1493,6 +1509,7 @@ class OrchestrationService:
                     patch_id=run.patch_set.patch_id,
                     originating_run_id=run.run_id,
                     changes_attempted=len(run.patch_set.changes),
+                    changed_files=[c.path for c in run.patch_set.changes],
                     validation_status="validated",
                     status="ok",
                 )
@@ -1514,7 +1531,7 @@ class OrchestrationService:
 
             # ── Per-repository auxiliary patches vs their own checkouts ──
             for inp in run.source.repo_patches or []:
-                result = self._validate_single_repo_patch(
+                result = await self._validate_single_repo_patch(
                     run,
                     inp.repository_id,
                     inp.patch,

@@ -16,6 +16,10 @@ Deterministic and offline (no paid LLM, no network; ``source=local`` only):
     F. End-to-end execute_run (A1+A4)  — primary + aux patches each apply to
        their own checkout; the aux patch never touches primary; the result
        aggregates ``repo_validation`` (primary + repo-b), run APPROVED.
+    G. Per-repo EKG ingestion (A5)      — after the same execute_run, the aux
+       repository's OWN namespace carries RUN/PATCH/FILE evidence, and the
+       org graph links the run across namespaces via REFERENCES edges;
+       ``RepositoryPatchResult.changed_files`` feeds the per-repo evidence.
 
 Usage:
     python scripts/demo_phase20.py          # in-memory (deterministic)
@@ -442,6 +446,104 @@ async def demo_f(tmp_root: str) -> dict:
     }
 
 
+async def demo_g(tmp_root: str) -> dict:
+    """G. Per-repo EKG ingestion (Phase 20 A5)."""
+    from app.models.coding import FileChange, FileOperation, PatchSet
+    from app.models.engineering_graph import EKNodeType, EKRelationshipType
+    from app.models.orchestration import RunStatus, StageType
+    from app.services.orchestration_service import OrchestrationService
+
+    # Re-runs share tmp_root, so prior demos may have left files behind —
+    # start from clean checkouts so the CREATE patches validate deterministically.
+    for rid in ("primary", "repo-b"):
+        shutil.rmtree(Path(tmp_root) / rid, ignore_errors=True)
+    primary = _write_local_repo(tmp_root, "primary", {"main.py": "p1\n"})
+    aux = _write_local_repo(tmp_root, "repo-b", {"app.py": "b1\n"})
+    orch = OrchestrationService()
+    run = await orch.create_run(_run_source(primary, aux))
+
+    run.current_stage = StageType.CODING
+    run.repository_profile = AsyncMock()
+    reqs, plan = _reqs()
+    run.requirements = reqs
+    run.plan = plan
+    run.retrieved_context = AsyncMock()
+    run.patch_set = PatchSet(patch_id="primary", changes=[
+        FileChange(
+            change_id="primary-C1", operation=FileOperation.MODIFY,
+            path="main.py", new_content="p2\n",
+        ),
+    ])
+    await orch._store.update(run)
+
+    async def _mock_stage(target: StageType):
+        async def _fn(run, *args, **kwargs):
+            run.current_stage = target
+            return True
+        return _fn
+
+    async def _mock_approve():
+        async def _fn(run, *args, **kwargs):
+            run.current_stage = StageType.QUALITY_GATE
+            run.status = RunStatus.APPROVED
+            return True
+        return _fn
+
+    with patch.object(OrchestrationService, "_stage_testing",
+                      new_callable=AsyncMock, side_effect=await _mock_stage(StageType.TESTING)), \
+         patch.object(OrchestrationService, "_stage_review",
+                      new_callable=AsyncMock, side_effect=await _mock_stage(StageType.REVIEWING)), \
+         patch.object(OrchestrationService, "_stage_quality_gate",
+                      new_callable=AsyncMock, side_effect=await _mock_approve()):
+        result = await orch.execute_run(run.run_id, workspace_root=primary)
+
+    assert result.status == RunStatus.APPROVED
+    assert Path(primary, "main.py").read_text() == "p2\n"
+    assert Path(aux, "feature.py").read_text() == "f1\n"
+
+    # A5: changed_files evidence populated during per-repo validation.
+    by_id = {r.repository_id: r for r in result.repo_validation}
+    assert by_id["repo-b"].changed_files == ["feature.py"]
+
+    # A5: per-repo EKG ingestion — repo-b's OWN namespace carries the evidence.
+    org = orch._get_org_graph()
+    assert org is not None
+    assert org.get_namespace("repo-b") is not None
+    graph_b = org.get_graph("repo-b")
+    assert graph_b is not None
+    run_nodes = graph_b.find_nodes(
+        node_type=EKNodeType.RUN, source_ref=run.run_id, repository_id="repo-b"
+    )
+    assert len(run_nodes) == 1
+    patch_nodes = graph_b.find_nodes(
+        node_type=EKNodeType.PATCH, source_ref=run.run_id, repository_id="repo-b"
+    )
+    assert len(patch_nodes) == 1
+    assert patch_nodes[0].payload["files"] == ["feature.py"]
+    assert patch_nodes[0].payload["validation_status"] == "validated"
+    assert patch_nodes[0].payload["application_status"] == "applied"
+    files = graph_b.find_nodes(node_type=EKNodeType.FILE, repository_id="repo-b")
+    assert any(n.source_ref == "feature.py" for n in files)
+
+    # A5: the org graph links the run across namespaces.
+    run_node = org._org_graph._find_run_node(run.run_id, EKNodeType.RUN)
+    assert run_node is not None
+    assert any(
+        e.relationship == EKRelationshipType.REFERENCES
+        and e.target_id == "REPO::repo-b"
+        for e in org._org_graph.get_edges(run_node.node_id)
+    )
+
+    return {
+        "run_status": result.status.value,
+        "repo_b_namespace_ingested": True,
+        "repo_b_patch_files": patch_nodes[0].payload["files"],
+        "cross_namespace_link": True,
+        "changed_files_evidence": by_id["repo-b"].changed_files,
+        "persistence": "postgresql" if _is_pg_configured() else "in-memory",
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 20 cross-repo + scope demo")
     parser.add_argument("--pg", action="store_true",
@@ -460,6 +562,7 @@ async def main() -> None:
             ("D_per_repo_validation", demo_d, True),
             ("E_cross_checkout_rejection", demo_e, True),
             ("F_execute_run_end_to_end", demo_f, True),
+            ("G_per_repo_ekg_ingestion", demo_g, True),
         ]:
             try:
                 results[name] = await fn(tmp_root) if use_tmp else await fn()
@@ -491,6 +594,7 @@ async def main() -> None:
         "D_per_repo_validation": "D. Per-repo validation against its OWN checkout",
         "E_cross_checkout_rejection": "E. Cross-checkout rejection (blocking scope violation)",
         "F_execute_run_end_to_end": "F. End-to-end execute_run (own-checkout apply + repo_validation)",
+        "G_per_repo_ekg_ingestion": "G. Per-repo EKG ingestion (namespace evidence + cross-namespace run link)",
     }
     for name, r in results.items():
         mark = "PASS" if r.get("PASS") else "FAIL"
@@ -515,6 +619,8 @@ async def main() -> None:
           f"{'PASS' if results['E_cross_checkout_rejection'].get('PASS') else 'FAIL'}")
     print(f"  END-TO-END MULTI-REPO RUN: "
           f"{'PASS' if results['F_execute_run_end_to_end'].get('PASS') else 'FAIL'}")
+    print(f"  PER-REPO EKG INGESTION: "
+          f"{'PASS' if results['G_per_repo_ekg_ingestion'].get('PASS') else 'FAIL'}")
     print(f"  POSTGRESQL: {'PASS' if pg else 'n/a (in-memory)'}")
     print(f"{'='*64}\n")
 
