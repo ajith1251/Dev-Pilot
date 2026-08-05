@@ -133,6 +133,18 @@ Close the execution gap on top of the org graph.
 
 - **B1.** Billing on the Gemini key or **Vertex AI** (IAM, no training) — infra
   decision, needs user action (recommendation 3).
+  **✅ DONE (Session 37) — billing on the existing Gemini key (user decision).**
+  `DEVPILOT_GEMINI_TIER` (free|paid, default free) + optional
+  `DEVPILOT_GEMINI_PAID_MODELS` (first = default) config knobs; paid tier keeps
+  `GEMINI_API_KEY` (same key format, billing attached in AI Studio), disables
+  the free-tier daily-quota failover and 24h exhaustion markers, fails fast with
+  a clear "check your plan and billing" error on a genuine quota/billing issue,
+  and still retries transient per-minute 429s. `GeminiProvider.tier` +
+  `model_candidates` introspection; `GET /api/v1/providers/config` exposes
+  `data.gemini.{tier,paid_models}`; `POST /api/v1/providers/test` returns
+  `gemini_tier`/`gemini_models` for a paid-key self-check. 12 new tests (5
+  paid-tier provider + 6 config parsing + 1 config_snapshot); full suite
+  **1684 passed / 18 skipped / 1 pre-existing env failure**.
 - **B2.** Typed fallback lists per capability
   (`DEVPILOT_LLM_PROVIDER_FALLBACKS`, `MULTI_PROVIDER_ROUTING.md` §2.7).
   **✅ DONE (Session 34):** `Capability` enum (analysis/planning/coding/testing/
@@ -198,7 +210,7 @@ Close the execution gap on top of the org graph.
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, **A5 ✅ DONE (Session 32)** |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
 | 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — **✅ DONE (Session 33)**: dashboard run form + run-detail multi-repo surface |
-| 5 | B/D/E | hardening + polish (B1 needs a user infra decision) |
+| 5 | B/D/E | hardening + polish (**B1, B2, B3 ✅ DONE (Sessions 34/35/37)**; B2/B3 in `test_provider_router.py`, B1 paid tier in `test_llm_providers.py`) |
 
 ---
 
@@ -223,7 +235,7 @@ Close the execution gap on top of the org graph.
   4 in `test_phase20_multi_repo_run.py`);**
   **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`);**
   **✅ A5 covered (13 tests in `tests/test_phase20_repo_ingestion.py`).**
-- Full deterministic suite stays green (**1655 passed / 18 skipped / 1 pre-existing
+- Full deterministic suite stays green (**1684 passed / 18 skipped / 1 pre-existing
   env failure**).
 - `scripts/demo_phase20.py` demos A–G ALL PASS (deterministic, no paid LLM).
 
@@ -231,9 +243,8 @@ Close the execution gap on top of the org graph.
 
 ## 6. Next
 
-**Phase 20B hardening** (production reliability): B1 needs a user infra decision
-(billing on the Gemini key or Vertex AI); **B2 (Session 34) and B3 (Session 35)
-are DONE** — typed per-capability fallback chains and mid-stream token-loss
-failover are both committed. Remaining: B1 (user decision), then workstream D
-(org-graph UI parity on the React Flow engine) and E (extra test-framework
-parsers). Workstream C (live E2E) re-runs after a Gemini quota reset.
+**Phase 20B COMPLETE**: B1 (paid Gemini tier, billing on the existing key —
+Session 37), B2 (typed per-capability fallbacks — Session 34) and B3
+(mid-stream token-loss failover — Session 35) are all DONE. Remaining:
+workstream E (extra test-framework parsers) and any polish; workstream C
+(live E2E) re-runs after a Gemini quota reset.

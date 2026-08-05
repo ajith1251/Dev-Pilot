@@ -60,7 +60,7 @@ llm_factory.get_provider() ──► RoutedProvider (facade, same BaseLLMProvide
 
 | Provider | Key/Config | Default model | Notes |
 |----------|-----------|---------------|-------|
-| `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` | Free tier; multi-model daily-quota failover |
+| `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` | Free tier: multi-model daily-quota failover. Paid tier (`DEVPILOT_GEMINI_TIER=paid`): no daily-quota failover/markers, optional `DEVPILOT_GEMINI_PAID_MODELS` (see §2.9) |
 | `openai` | `OPENAI_API_KEY` | vendor default | |
 | `anthropic` | `ANTHROPIC_API_KEY` | vendor default | |
 | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` | OpenAI-compatible |
@@ -199,7 +199,33 @@ failure surfaces as `LLMError` (the caller keeps the tokens already received).
 Setting the value to `0` disables mid-stream recovery entirely, restoring
 surfaces-as-error behaviour.
 
-### 2.9 Failure contract — never silent
+### 2.9 Paid Gemini tier (Phase 20B B1)
+
+Attaching billing to the **same** AI Studio `GEMINI_API_KEY` is now a first-class
+config switch — no key rotation, no provider/auth change. `DEVPILOT_GEMINI_TIER`
+selects the runtime behavior:
+
+| | `free` (default) | `paid` |
+|---|---|---|
+| Cross-model daily-quota failover | ✅ automatic (`_CANDIDATE_MODELS`) | ❌ disabled (billing = no daily buckets) |
+| 24h exhaustion markers | ✅ (`_exhausted_at`, TTL-pruned) | ❌ never written |
+| Quota/billing error on a call | → mark exhausted + fail over | → **fail fast** with a clear "check your plan and billing" error |
+| Transient per-minute 429 retry | ✅ exponential backoff | ✅ unchanged |
+| Model pool | `gemini-3.6-flash` → flash-lite → 3.5-flash | `DEVPILOT_GEMINI_PAID_MODELS` (first = default) or the default model |
+
+```bash
+# backend/.env — same key, paid mode
+DEVPILOT_LLM_PROVIDER=gemini
+GEMINI_API_KEY=<same key, billing attached in AI Studio>
+DEVPILOT_GEMINI_TIER=paid
+DEVPILOT_GEMINI_PAID_MODELS=gemini-3.6-pro-preview,gemini-3.6-flash
+```
+
+Self-check: `POST /api/v1/providers/test` returns `gemini_tier` +
+`gemini_models` when the active provider is Gemini; `GET /api/v1/providers/config`
+exposes `data.gemini.{tier,paid_models}` (secret-safe).
+
+### 2.10 Failure contract — never silent
 
 When every provider fails, the router raises `AllProvidersFailedError` carrying
 a `failures` list — one `ProviderCallFailedError` per provider attempt with its
@@ -207,7 +233,7 @@ a `failures` list — one `ProviderCallFailedError` per provider attempt with it
 **why**. Router exceptions live in `app/core/exceptions.py` and are surfaced
 (503) by the `/api/v1/providers/test` endpoint and the `provider-test` CLI.
 
-### 2.10 Redaction
+### 2.11 Redaction
 
 `app/llm/redaction.py` recursively redacts secrets from any snapshot/dict
 before it leaves the backend: keys named like `api_key`, `token`, `secret`,
@@ -239,6 +265,8 @@ All settings live in `app/config.py`:
 | `PROVIDER_HEALTH_DEGRADED_SUCCESS_RATE` | `0.5` | Below this → degraded |
 | `PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE` | `0.3` | Below this → unhealthy |
 | `PROVIDER_METRICS_PERSIST` | `True` | Best-effort PG metric snapshots |
+| `GEMINI_TIER` | `free` | Gemini key tier: `free` (daily per-model quota + cross-model failover) or `paid` (billing attached — no daily-quota failover/markers, fail-fast on billing errors) |
+| `GEMINI_PAID_MODELS` | *(empty)* | Paid-tier model list (comma string or JSON); first = default |
 
 Plus the new provider credentials: `OPENROUTER_API_KEY`, `OLLAMA_BASE_URL`.
 
@@ -356,4 +384,11 @@ live-Gemini durability tests that require a fresh free-tier quota key.
   — **✅ DONE (Phase 20B, Session 35):** streams that drop after delivering
   tokens resume on the next provider with the partial output as continuation
   context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`; see §2.8.
-- Billing/Vertex AI path for production-grade Gemini reliability.
+- **Paid Gemini tier (billing on the existing key)**
+  — **✅ DONE (Phase 20B B1, Session 37):** `DEVPILOT_GEMINI_TIER=paid` keeps
+  the same `GEMINI_API_KEY` (billing attached in AI Studio) — the free-tier
+  daily-quota failover and 24h exhaustion markers are disabled, a genuine
+  billing/quota error fails fast, and transient 429s still retry. Optional
+  `DEVPILOT_GEMINI_PAID_MODELS` pins the paid model pool. `POST
+  /api/v1/providers/test` returns `gemini_tier`/`gemini_models`; see §2.9.
+- Vertex AI (IAM, no-training terms) remains an optional enterprise path.

@@ -114,11 +114,18 @@ async def provider_test(payload: Optional[Dict[str, Any]] = None) -> Dict[str, A
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)[:300]) from exc
-    return {
-        "success": True,
-        "data": {
-            "provider": r.active_provider,
-            "content": response.content[:200],
-            "finish_reason": response.finish_reason,
-        },
+    data = {
+        "provider": r.active_provider,
+        "content": response.content[:200],
+        "finish_reason": response.finish_reason,
     }
+    # Gemini self-check: surface the tier + paid model list so a key with
+    # billing attached can be verified to run in the intended mode.
+    if r.active_provider == "gemini":
+        from app.config import settings as app_settings
+
+        data["gemini_tier"] = str(
+            getattr(app_settings, "GEMINI_TIER", "free") or "free")
+        data["gemini_models"] = list(
+            getattr(app_settings, "GEMINI_PAID_MODELS", None) or [])
+    return {"success": True, "data": data}

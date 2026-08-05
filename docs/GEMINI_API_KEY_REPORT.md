@@ -53,7 +53,7 @@ Production-grade hardening was added along the way: model-sentinel handling, rat
 | File | Role |
 |---|---|
 | `app/config.py` | `GEMINI_API_KEY: Optional[str]` field (alias, never hardcoded) |
-| `app/llm/providers/gemini.py` | The provider: SDK client, model resolution, retry/failover |
+| `app/llm/providers/gemini.py` | The provider: SDK client, model resolution, retry/failover, tier handling |
 | `app/llm/factory.py` | Registry: `{"openai", "anthropic", "gemini", "fake"}` |
 | `app/llm/base.py` | `BaseLLMProvider`, `LLMConfig`, `LLMMessage`, `LLMResponse` contracts |
 | `.env.example` | Documents how to obtain the free key |
@@ -151,6 +151,34 @@ Typical call volume: **~24-30 calls per full demo** (4 runs × ~5-7 LLM stages) 
 
 **Bottom line**: the free key is perfect for machine-verifiable demos and CI. For real workloads, attach billing (keeps the same key format) or move to Vertex for compliance-grade control.
 
+### 7.1 Paid tier — the `DEVPILOT_GEMINI_TIER` knob (Phase 20B B1)
+
+Attaching billing to the **same** AI Studio key (no key rotation, no new auth) is
+now a first-class config switch. `DEVPILOT_GEMINI_TIER` selects the runtime
+behavior:
+
+| | `free` (default) | `paid` |
+|---|---|---|
+| Cross-model daily-quota failover | ✅ automatic (`_CANDIDATE_MODELS`) | ❌ disabled (billing = no daily buckets) |
+| 24h exhaustion markers | ✅ (`_exhausted_at`, TTL-pruned) | ❌ never written |
+| Quota/billing error on call | → fail over to next model | → **fail fast** with a clear "check your plan and billing" error |
+| Transient per-minute 429 retry | ✅ exponential backoff | ✅ unchanged |
+| Model candidates | `gemini-3.6-flash` → flash-lite → 3.5-flash | `DEVPILOT_GEMINI_PAID_MODELS` if set (first = default), else the default model |
+
+```
+# backend/.env — same key, paid mode
+DEVPILOT_LLM_PROVIDER=gemini
+GEMINI_API_KEY=<same key, billing attached in AI Studio>
+DEVPILOT_GEMINI_TIER=paid
+# Optional: pin models (first is the default). Without this the default model is used.
+DEVPILOT_GEMINI_PAID_MODELS=gemini-3.6-pro-preview,gemini-3.6-flash
+```
+
+Verification: `POST /api/v1/providers/test` now returns `gemini_tier` +
+`gemini_models` in its data when the active provider is Gemini, so a paid key
+can be confirmed to run in the intended mode. `GET /api/v1/providers/config`
+also exposes `data.gemini.tier` / `data.gemini.paid_models` (secret-safe).
+
 ---
 
 ## 8. Security & Privacy Notes
@@ -205,7 +233,7 @@ This demonstrates the **core Phase 17 invariant** with real content: determinist
 
 1. **Keep `gemini-3.5-flash-lite` / `gemini-3.6-flash` as defaults** — verified working; if a default exhausts its daily bucket the failover covers it.
 2. **Document the free-tier data-training caveat** in the README demo section (privacy matters for real workloads).
-3. **Production path**: attach billing to the same key (no code change needed), or move to Vertex AI for IAM + no-training guarantees.
+3. **Production path**: attach billing to the same key (keeps the same key format) — **DONE (Phase 20B B1, Session 37)**: flip `DEVPILOT_GEMINI_TIER=paid`; no code or key change required. Or move to Vertex AI for IAM + no-training guarantees.
 4. **Demo cadence**: run `--live` once per day after the midnight-Pacific reset (fresh per-model buckets), or with a paid key for unlimited runs.
 5. **Optional improvement**: one LLM retry when the coding agent returns an empty patch would reduce the ~20-25% empty-response variance at the cost of quota.
 

@@ -83,10 +83,21 @@ class GeminiProvider(BaseLLMProvider):
     Uses the official `google-genai` SDK (async `client.aio.models`).
     Requires a GEMINI_API_KEY in .env (free tier available via Google AI
     Studio). Per-minute rate-limit (429) and transient errors are retried
-    with exponential backoff; a model's exhausted free-tier DAILY quota
-    triggers automatic failover to the next candidate model (_CANDIDATE_MODELS)
-    so multi-run workflows (e.g. the live demo) survive the 20 req/day
-    per-model cap.
+    with exponential backoff.
+
+    Tier behavior (Phase 20B B1, DEVPILOT_GEMINI_TIER):
+
+    * ``free`` (default): each model has its own ~20 req/day bucket, so a
+      model's exhausted free-tier DAILY quota triggers automatic failover to
+      the next candidate model (_CANDIDATE_MODELS) with a 24h exhaustion
+      marker, letting multi-run workflows (e.g. the live demo) survive the
+      per-model cap.
+    * ``paid``: billing is attached to the key, so the daily-quota failover
+      and exhaustion markers are unnecessary. Calls never switch models on a
+      quota error — a genuine billing/quota problem surfaces immediately —
+      while transient per-minute 429s are still retried. An optional
+      ``DEVPILOT_GEMINI_PAID_MODELS`` list pins the candidate pool (first
+      entry becomes the default model).
     """
 
     def __init__(self) -> None:
@@ -97,6 +108,15 @@ class GeminiProvider(BaseLLMProvider):
                 "Set it in your .env file or environment."
             )
         self._client = genai.Client(api_key=api_key)
+        # Tier selection (see class docstring). Everything below defaults to
+        # the free tier so an existing deployment is completely unchanged.
+        self._tier: str = str(
+            getattr(settings, "GEMINI_TIER", "free") or "free"
+        ).strip().lower()
+        paid_models = list(getattr(settings, "GEMINI_PAID_MODELS", None) or [])
+        self._paid_models: tuple = tuple(
+            str(m).strip().lower() for m in paid_models if str(m).strip()
+        )
         # Models whose free-tier daily quota is exhausted (resets daily at
         # midnight Pacific). Until the marker expires (see
         # _EXHAUSTION_TTL_SECONDS) calls fail over to the next candidate with
@@ -107,6 +127,23 @@ class GeminiProvider(BaseLLMProvider):
         # construction — there is no way to add a marker without a timestamp.
         self._exhausted_at: Dict[str, float] = {}
         self._exhaustion_ttl_seconds: float = _EXHAUSTION_TTL_SECONDS
+
+    @property
+    def tier(self) -> str:
+        """'free' or 'paid' — the DEVPILOT_GEMINI_TIER in effect."""
+        return self._tier
+
+    @property
+    def model_candidates(self) -> tuple:
+        """Candidate model pool used for cross-model quota failover.
+
+        Free tier: the bundled _CANDIDATE_MODELS. Paid tier: the configured
+        DEVPILOT_GEMINI_PAID_MODELS when present, else just the default model
+        — billing removes the need to spread load across free daily buckets.
+        """
+        if self._tier == "paid":
+            return self._paid_models or (self.default_model,)
+        return _CANDIDATE_MODELS
 
     @property
     def _exhausted_models(self) -> set:
@@ -142,16 +179,22 @@ class GeminiProvider(BaseLLMProvider):
         raises its clear "all quota exhausted" error. Expired exhaustion
         markers are pruned first, so a model whose daily bucket refilled
         (after the TTL / midnight reset) is tried again automatically.
+
+        Paid tier: exhaustion markers are meaningless (billing removes the
+        daily buckets), so the preferred model is always returned and no
+        cross-model failover ever happens.
         """
+        if self._tier == "paid":
+            return preferred
         self._prune_exhausted()
         if preferred not in self._exhausted_at:
             return preferred
-        # Only fail over among the free-tier candidate models. An explicitly
+        # Only fail over among the candidate models. An explicitly
         # requested non-candidate model (e.g. gemini-3.6-pro-preview) must not
         # be silently swapped for a flash model — it surfaces its own error.
-        if preferred not in _CANDIDATE_MODELS:
+        if preferred not in self.model_candidates:
             return preferred
-        for name in _CANDIDATE_MODELS:
+        for name in self.model_candidates:
             if name not in self._exhausted_at:
                 return name
         return preferred
@@ -173,6 +216,18 @@ class GeminiProvider(BaseLLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if _is_permanent_quota(exc):
+                    if self._tier == "paid":
+                        # Billing is attached to the key, so a quota/billing
+                        # error is a REAL plan problem, not a spent free-tier
+                        # daily bucket. Don't mark the model exhausted and
+                        # don't fail over — surface it immediately so the
+                        # user can fix their billing. (Transient per-minute
+                        # 429s were already handled by the rate-limit branch
+                        # below.)
+                        raise LLMError(
+                            f"Gemini paid-tier call failed (check your plan "
+                            f"and billing): {exc}"
+                        ) from exc
                     self._exhausted_at[model] = time.monotonic()
                     nxt = self._first_available(model)
                     if nxt != model:
@@ -210,12 +265,16 @@ class GeminiProvider(BaseLLMProvider):
 
     @property
     def default_model(self) -> str:
+        # In the paid tier, the first configured DEVPILOT_GEMINI_PAID_MODELS
+        # entry becomes the default (e.g. a pro model). Otherwise
         # gemini-3.6-flash is the current stable free-tier flash model with
         # working quota (gemini-2.5-flash was retired; gemini-3.5-flash's
         # free-tier daily quota can be consumed quickly). Deliberately
         # independent of settings.LLM_MODEL (which is OpenAI-biased:
         # "gpt-4o-mini") — mirroring how AnthropicProvider hardcodes its own
         # default so a switch of provider alone just works.
+        if self._tier == "paid" and self._paid_models:
+            return self._paid_models[0]
         return "gemini-3.6-flash"
 
     def _resolve_model(self, cfg: LLMConfig) -> str:
@@ -230,7 +289,8 @@ class GeminiProvider(BaseLLMProvider):
         if not model or model == LLMConfig().model:
             model = self.default_model
         # Prefer the requested model, but skip any whose daily quota is
-        # exhausted so calls land on a model that can still serve them.
+        # exhausted so calls land on a model that can still serve them
+        # (free tier only — the paid tier never swaps models).
         return self._first_available(model)
 
     @staticmethod

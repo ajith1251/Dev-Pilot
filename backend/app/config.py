@@ -53,6 +53,23 @@ class Settings(BaseSettings):
 
     # ─── Gemini (Google AI) ──────────────────────────────────────
     GEMINI_API_KEY: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
+    GEMINI_TIER: str = Field(
+        default="free", alias="DEVPILOT_GEMINI_TIER",
+        description="Gemini key tier (Phase 20B B1): 'free' (Google AI "
+                    "Studio free tier — each model has its own ~20 req/day "
+                    "bucket, so calls fail over across candidate models and "
+                    "exhausted models are remembered for 24h) or 'paid' "
+                    "(billing attached to the key — no daily-quota failover "
+                    "and no exhaustion markers; transient per-minute 429s "
+                    "are still retried).",
+    )
+    GEMINI_PAID_MODELS: List[str] = Field(
+        default=[], alias="DEVPILOT_GEMINI_PAID_MODELS",
+        description="Comma-separated Gemini models for the paid tier, e.g. "
+                    "'gemini-3.6-pro-preview,gemini-3.6-flash'. The first is "
+                    "the default model. Only used when DEVPILOT_GEMINI_TIER="
+                    "paid; empty keeps the provider default.",
+    )
 
     # ─── OpenRouter (Phase 19B) ──────────────────────────────────
     OPENROUTER_API_KEY: Optional[str] = Field(
@@ -388,6 +405,40 @@ class Settings(BaseSettings):
                 f"EMBEDDING_PROVIDER must be one of {allowed}, got '{v}'"
             )
         return val
+
+    @field_validator("GEMINI_TIER")
+    @classmethod
+    def validate_gemini_tier(cls, v: str) -> str:
+        val = v.strip().lower()
+        if val not in {"free", "paid"}:
+            raise ValueError(
+                f"GEMINI_TIER must be 'free' or 'paid', got '{v}'"
+            )
+        return val
+
+    @field_validator("GEMINI_PAID_MODELS", mode="before")
+    @classmethod
+    def validate_gemini_paid_models(cls, v) -> List[str]:
+        """Accept a comma-separated env string or a JSON list of model names.
+
+        Names are lower-cased and de-duplicated preserving first-seen order.
+        Empty entries are dropped; an unset value yields an empty list.
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            items = [m.strip().lower() for m in v.split(",") if m.strip()]
+        elif isinstance(v, (list, tuple)):
+            items = [str(m).strip().lower() for m in v if str(m).strip()]
+        else:
+            items = [str(v).strip().lower()]
+        seen: set = set()
+        out: List[str] = []
+        for m in items:
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
 
     @property
     def is_debug(self) -> bool:

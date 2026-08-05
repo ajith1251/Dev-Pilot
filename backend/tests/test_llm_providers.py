@@ -404,6 +404,130 @@ class TestGeminiProvider:
         assert chunks == ["tok", "tok"]
 
 
+class TestGeminiPaidTier:
+    """Phase 20B B1 — DEVPILOT_GEMINI_TIER=paid (billing attached to the key).
+
+    Paid tier disables the free-tier daily-quota machinery: no cross-model
+    failover, no 24h exhaustion markers, no "wait for midnight" errors. A
+    genuine quota/billing error surfaces immediately; transient per-minute
+    429s are still retried.
+    """
+
+    def test_default_tier_is_free_and_paid_models_ignored(self) -> None:
+        from app.config import settings
+        from app.llm.providers.gemini import GeminiProvider
+
+        with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+             patch.object(settings, "GEMINI_PAID_MODELS",
+                          ["gemini-3.6-pro-preview"]):
+            provider = GeminiProvider()
+        assert provider.tier == "free"
+        assert provider.default_model == "gemini-3.6-flash"
+        assert provider.model_candidates == (
+            "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash")
+
+    def test_paid_tier_uses_configured_models(self) -> None:
+        from app.config import settings
+        from app.llm.providers.gemini import GeminiProvider
+
+        with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+             patch.object(settings, "GEMINI_TIER", "paid"), \
+             patch.object(settings, "GEMINI_PAID_MODELS",
+                          ["gemini-3.6-pro-preview", "gemini-3.6-flash"]):
+            provider = GeminiProvider()
+        assert provider.tier == "paid"
+        assert provider.default_model == "gemini-3.6-pro-preview"
+        assert provider.model_candidates == (
+            "gemini-3.6-pro-preview", "gemini-3.6-flash")
+        assert provider._resolve_model(LLMConfig()) == "gemini-3.6-pro-preview"
+        # an explicit model is still honored
+        assert provider._resolve_model(
+            LLMConfig(model="gemini-3.6-flash")) == "gemini-3.6-flash"
+
+    def test_paid_tier_ignores_exhaustion_markers(self) -> None:
+        """Billing removes the daily per-model buckets — markers are ignored,
+        so the preferred model is always returned (no failover)."""
+        from app.config import settings
+        from app.llm.providers.gemini import GeminiProvider, time as _time
+
+        with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+             patch.object(settings, "GEMINI_TIER", "paid"):
+            provider = GeminiProvider()
+        provider._exhausted_at["gemini-3.6-flash"] = _time.monotonic()
+        assert provider._exhausted_models == {"gemini-3.6-flash"}
+        assert provider._first_available("gemini-3.6-flash") == "gemini-3.6-flash"
+        assert provider._resolve_model(LLMConfig()) == "gemini-3.6-flash"
+
+    @pytest.mark.asyncio
+    async def test_paid_tier_quota_error_fails_fast_without_failover(self) -> None:
+        """A billing/quota error on a paid key is a REAL problem — raise it
+        immediately, never mark the model exhausted, never switch models."""
+        from app.config import settings
+        from app.core.exceptions import LLMError
+        from app.llm.providers.gemini import GeminiProvider
+
+        class _Billing(Exception):
+            code = 429
+
+        fake_client = MagicMock()
+        call = AsyncMock(side_effect=_Billing(
+            "You exceeded your current quota, please check your plan and "
+            "billing details."))
+        fake_client.aio.models.generate_content = call
+
+        with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+             patch.object(settings, "GEMINI_TIER", "paid"), \
+             patch("app.llm.providers.gemini.genai.Client",
+                   return_value=fake_client), \
+             patch("app.llm.providers.gemini.asyncio.sleep", new=AsyncMock()):
+            provider = GeminiProvider()
+            with pytest.raises(LLMError, match="paid-tier call failed"):
+                await provider.chat([LLMMessage(role="user", content="hi")])
+
+        # Exactly one probe of the default model, no exhaustion marker.
+        assert call.await_count == 1
+        used = [c.kwargs["model"] for c in call.await_args_list]
+        assert used == ["gemini-3.6-flash"]
+        assert provider._exhausted_at == {}
+
+    @pytest.mark.asyncio
+    async def test_paid_tier_still_retries_transient_rate_limits(self) -> None:
+        """Only the daily-quota failover is disabled — a transient per-minute
+        429 keeps its exponential-backoff retry in the paid tier too."""
+        from app.config import settings
+        from app.llm.providers.gemini import GeminiProvider
+
+        class _PerMinute(Exception):
+            code = 429
+            retry_delay = None
+
+        good_response = MagicMock()
+        good_response.text = "ok"
+        good_response.candidates = []
+        good_response.usage_metadata = None
+
+        fake_client = MagicMock()
+        call = AsyncMock(side_effect=[
+            _PerMinute("429 RESOURCE_EXHAUSTED: generate_content_free_tier_requests, "
+                       "limit: 5/min"),
+            good_response,
+        ])
+        fake_client.aio.models.generate_content = call
+
+        with patch.object(settings, "GEMINI_API_KEY", "test-key"), \
+             patch.object(settings, "GEMINI_TIER", "paid"), \
+             patch("app.llm.providers.gemini.genai.Client",
+                   return_value=fake_client), \
+             patch("app.llm.providers.gemini.asyncio.sleep", new=AsyncMock()):
+            provider = GeminiProvider()
+            result = await provider.chat([LLMMessage(role="user", content="hi")])
+
+        assert result.content == "ok"
+        assert call.await_count == 2  # one retry after the 429, same model
+        used = [c.kwargs["model"] for c in call.await_args_list]
+        assert used == ["gemini-3.6-flash", "gemini-3.6-flash"]
+
+
 def _async_gen(items):
     async def _gen():
         for item in items:
@@ -442,3 +566,48 @@ class TestEmbeddingProviderConfig:
 
         with pytest.raises(ValidationError):
             Settings(DEVPILOT_EMBEDDING_PROVIDER="anthropic")
+
+
+class TestGeminiTierConfig:
+    """DEVPILOT_GEMINI_TIER / DEVPILOT_GEMINI_PAID_MODELS parsing (Phase 20B B1)."""
+
+    def test_tier_defaults_to_free(self) -> None:
+        from app.config import Settings
+
+        assert Settings().GEMINI_TIER == "free"
+
+    def test_tier_accepts_paid_and_case_normalizes(self) -> None:
+        from app.config import Settings
+
+        assert Settings(DEVPILOT_GEMINI_TIER="paid").GEMINI_TIER == "paid"
+        assert Settings(DEVPILOT_GEMINI_TIER="FREE").GEMINI_TIER == "free"
+        assert Settings(DEVPILOT_GEMINI_TIER=" Paid ").GEMINI_TIER == "paid"
+
+    def test_tier_rejects_unknown_value(self) -> None:
+        from pydantic import ValidationError
+
+        from app.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(DEVPILOT_GEMINI_TIER="pro")
+
+    def test_paid_models_parses_env_string(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_GEMINI_PAID_MODELS="gemini-3.6-pro-preview,gemini-3.6-flash")
+        assert s.GEMINI_PAID_MODELS == [
+            "gemini-3.6-pro-preview", "gemini-3.6-flash"]
+
+    def test_paid_models_normalizes_and_dedupes(self) -> None:
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_GEMINI_PAID_MODELS="Gemini-3.6-Pro-Preview,gemini-3.6-flash,gemini-3.6-pro-preview")
+        assert s.GEMINI_PAID_MODELS == [
+            "gemini-3.6-pro-preview", "gemini-3.6-flash"]
+
+    def test_paid_models_empty_when_unset(self) -> None:
+        from app.config import Settings
+
+        assert Settings(DEVPILOT_GEMINI_PAID_MODELS="").GEMINI_PAID_MODELS == []
+        assert Settings(DEVPILOT_GEMINI_PAID_MODELS=None).GEMINI_PAID_MODELS == []

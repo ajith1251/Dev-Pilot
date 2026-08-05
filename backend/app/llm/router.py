@@ -971,6 +971,12 @@ class ProviderRouter:
         snapshot["provider_fallbacks"] = {
             cap: list(names) for cap, names in self._fallbacks().items()
         }
+        # Gemini tier is not a secret — model names never contain key material.
+        snapshot["gemini"] = {
+            "tier": str(getattr(self._settings, "GEMINI_TIER", "free") or "free"),
+            "paid_models": list(
+                getattr(self._settings, "GEMINI_PAID_MODELS", None) or []),
+        }
         return snapshot
 
     def snapshot(self) -> Dict[str, Any]:

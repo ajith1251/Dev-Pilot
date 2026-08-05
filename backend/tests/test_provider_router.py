@@ -832,6 +832,20 @@ class TestRouterObservability:
         assert cfg["providers"]["gemini"]["configured"] is False
         assert cfg["providers"]["gemini"]["key"] == "<not set>"
 
+    def test_config_snapshot_exposes_gemini_tier(self) -> None:
+        r = self._router(
+            GEMINI_TIER="paid",
+            GEMINI_PAID_MODELS=["gemini-3.6-pro-preview", "gemini-3.6-flash"],
+        )
+        cfg = r.config_snapshot()
+        assert cfg["gemini"] == {
+            "tier": "paid",
+            "paid_models": ["gemini-3.6-pro-preview", "gemini-3.6-flash"],
+        }
+        # Default tier is free when the knob is absent.
+        r2 = self._router()
+        assert r2.config_snapshot()["gemini"] == {"tier": "free", "paid_models": []}
+
     def test_metrics_totals_and_uptime(self) -> None:
         r = self._router()
         snap = r.metrics_snapshot()

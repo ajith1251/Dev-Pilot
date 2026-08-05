@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 36 — Phase 20 Workstream D: org-graph UI parity on the React Flow engine)
-> **Current Phase**: Phase 20 — Workstream D COMPLETE (Session 36: `/dashboard/organization-graph` migrated onto `InteractiveGraph.tsx` + timeline diff + live WS; legacy `ForceDirectedGraph.tsx` deleted; pure mappers in `frontend/src/lib/graph/orgGraphModel.ts`; frontend vitest 49 passed (7 files), `next build` EXIT=0). Phase 20B (B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list; B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`; B1 billing/Vertex AI still needs a user infra decision). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1672 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **17 new tests** — B2: 12 (7 router capability fallbacks + 4 config parsing + 1 planner wiring), B3: 5 (4 stream-resume behaviour + 1 config parse; `test_provider_router.py` now 59). `scripts/demo_phase20.py` demos A–G ALL PASS.
+> **Last updated**: August 5, 2026 (session 37 — Phase 20B COMPLETE: B1 paid Gemini tier, billing on the existing key)
+> **Current Phase**: Phase 20B COMPLETE ✅ (B1 DONE Session 37: `DEVPILOT_GEMINI_TIER` free|paid + optional `DEVPILOT_GEMINI_PAID_MODELS` — paid tier keeps `GEMINI_API_KEY` (same key format, billing attached in AI Studio), disables free-tier daily-quota failover + 24h exhaustion markers, fails fast on genuine billing/quota errors, still retries transient 429s; `GET /api/v1/providers/config` exposes `data.gemini.{tier,paid_models}`, `POST /api/v1/providers/test` returns `gemini_tier`/`gemini_models`; 12 new tests. B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list. B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`). Phase 20 Workstream D COMPLETE (Session 36: `/dashboard/organization-graph` migrated onto `InteractiveGraph.tsx` + timeline diff + live WS; legacy `ForceDirectedGraph.tsx` deleted; pure mappers in `frontend/src/lib/graph/orgGraphModel.ts`; frontend vitest 49 passed (7 files), `next build` EXIT=0). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1684 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **29 new tests** — B1: 12 (5 paid-tier provider in `test_llm_providers.py` + 6 Gemini tier config + 1 router `config_snapshot`), B2: 12 (7 router capability fallbacks + 4 config parsing + 1 planner wiring), B3: 5 (4 stream-resume behaviour + 1 config parse; `test_provider_router.py` now 60). `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2428,9 +2428,60 @@ org API clients, timeline diff API. Missing: the org page still rendered on
 pure frontend). Docs updated: `workflow-status/PHASE20_ROADMAP.md` §D ✅,
 `AGENTS.md` Session 36. `.ai-memory/` created at workspace root.
 
-**Next:** Phase 20B — B1 (billing on the Gemini key or Vertex AI) still needs a
-user infra decision; all unblocked B slices (B2, B3) are done. Then workstream E
-(extra test-framework parsers). Workstream C (live E2E) re-runs after a Gemini
-quota reset.
+**Next:** Phase 20B — B1 (billing on the existing Gemini key) ✅ DONE in
+**Session 37**; B2 (Session 34) and B3 (Session 35) are done too — Phase 20B is
+COMPLETE. Then workstream E (extra test-framework parsers). Workstream C (live
+E2E) re-runs after a Gemini quota reset.
+
+---
+
+### Session 37 (August 5, 2026) — Phase 20B slice B1: Paid Gemini Tier (billing on the existing key) ✅
+
+**Goal:** close recommendation 3 — the production path for the Gemini LLM. User
+decision: **attach billing to the existing AI Studio `GEMINI_API_KEY`** (same
+key format, no Vertex migration, no provider/auth code change).
+
+**Changes.**
+
+- **`backend/app/config.py`** — `DEVPILOT_GEMINI_TIER` (`free|paid`, default
+  `free`) with a validator that rejects unknown values, and
+  `DEVPILOT_GEMINI_PAID_MODELS` (comma-separated or JSON list; lower-cased,
+  deduped preserving first-seen order; empty when unset).
+- **`backend/app/llm/providers/gemini.py`** — `GeminiProvider` is now
+  tier-aware. Paid tier: **no** cross-model daily-quota failover, **no** 24h
+  exhaustion markers (`_first_available` always returns the preferred model);
+  a genuine quota/billing error fails fast with a clear
+  "paid-tier call failed (check your plan and billing)" `LLMError` instead of
+  the free-tier "wait for midnight" all-exhausted error; transient per-minute
+  429s keep the existing exponential-backoff retry. `DEVPILOT_GEMINI_PAID_MODELS`
+  pins the paid candidate pool (first entry = `default_model`; free tier
+  ignores it). New introspection: `provider.tier`, `provider.model_candidates`.
+  Free tier is byte-for-byte unchanged (default).
+- **`backend/app/llm/router.py`** — `config_snapshot()` now exposes
+  `data.gemini = {tier, paid_models}` (secret-safe — model names only).
+- **`backend/app/api/v1/providers.py`** — `POST /api/v1/providers/test` adds
+  `gemini_tier` + `gemini_models` to the response when the active provider is
+  Gemini, so a paid key can be self-checked in the intended mode.
+
+**Files:** `backend/app/config.py`, `backend/app/llm/providers/gemini.py`,
+`backend/app/llm/router.py`, `backend/app/api/v1/providers.py`,
+`backend/.env.example`, `backend/tests/test_llm_providers.py` (+5 paid-tier
+provider tests `TestGeminiPaidTier` + 6 config tests `TestGeminiTierConfig`),
+`backend/tests/test_provider_router.py` (+1 `config_snapshot` tier test → 60
+total).
+
+**Validation:** targeted `test_llm_providers.py` + `test_provider_router.py`
+94 passed; full deterministic suite (`-m "not live"`) **1684 passed / 18
+skipped / 1 failed** (only the pre-existing
+`test_wrapper_skips_cleanly_without_provider` env quirk). Docs updated:
+`docs/GEMINI_API_KEY_REPORT.md` (§7.1 paid-tier knob + recommendation 3),
+`backend/.env.example`, `workflow-status/PHASE20_ROADMAP.md` (B1 ✅,
+Phase 20B COMPLETE). Frontend untouched (B1 is backend + docs).
+
+**Next:** Phase 20B is **COMPLETE** (B1, B2, B3). Remaining Phase 20: workstream
+E (extra test-framework parsers); workstream C (live E2E:
+`scripts/demo_phase17.py --live`, `scripts/verify_api_durability.py --live`)
+re-runs after a Gemini quota reset — a paid tier now makes unlimited runs
+possible without waiting for the daily reset.
 
 
