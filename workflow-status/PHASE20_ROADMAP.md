@@ -1,6 +1,6 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: IN PROGRESS — slices A1–A5 DONE (Sessions 28–32), A6 next
+> **Status**: IN PROGRESS — slices A1–A6 DONE (Sessions 28–33), Phase 20B next
 > **Date**: August 5, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
 > knowledge layer (EKG + organization graph) is now **cross-repository**, but the
@@ -106,6 +106,28 @@ Close the execution gap on top of the org graph.
   (per-repo ingest evidence) added, demos A–G ALL PASS.
 - **A6. API/CLI/frontend** — `POST /api/v1/runs` + `python -m app.cli run`
   accept `repositories`; dashboard run form exposes optional aux repos.
+  **✅ DONE (Session 33):** API run-detail surface — `_sanitize_run`
+  (`backend/app/api/v1/orchestration.py`) now exposes `auxiliary_repositories`
+  (raw spec list) + `repo_validation` (per-repo `RepositoryPatchResult.summary()`
+  list, incl. `changed_files`) on `GET /api/v1/runs/{id}` (the create-side
+  `repositories` field + CLI `--aux-repo` were already wired in A1/A2).
+  Frontend: `AuxiliaryRepositorySpec` + `RepositoryPatchValidation` types in
+  `frontend/src/lib/api/client.ts`, `runsApi.create` accepts optional
+  `repositories`; `CreateRunModal` (`frontend/src/app/dashboard/runs/page.tsx`)
+  gained an aux-repo editor (dynamic add/remove, local path OR
+  github owner/repo/ref, invalid rows dropped client-side, submitted as
+  `repositories`); run-detail page (`dashboard/runs/[id]/page.tsx`) renders the
+  aux repos in the Source card + a "Repository Validation" card
+  (status/changes/changed_files/errors). Tests: 2 new backend tests
+  (`TestRunDetailApiSurface` in `tests/test_phase20_repo_ingestion.py`, 15 total
+  in that file) + new `frontend/src/lib/api/client.test.ts` (2 tests); frontend
+  vitest 39/39, `next build` EXIT=0. Also hardened the TTL-boundary flake:
+  `test_exhausted_marker_expires_after_ttl` simulated exactly
+  `marked_at + ttl` but the provider prunes with `now - ts >= ttl`, so float
+  rounding could flip the `>=`; now uses `marked_at + 3601.0` (same hardening
+  previously applied to `test_chat_recovers_preferred_model_after_ttl`). Full
+  suite **1655 passed / 18 skipped / 1 pre-existing env failure**;
+  `scripts/demo_phase20.py` demos A–G ALL PASS.
 
 ### B. Production Reliability (recommendation 3 follow-through)
 
@@ -142,7 +164,7 @@ Close the execution gap on top of the org graph.
 | 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked — **✅ DONE (Session 28)** |
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, **A5 ✅ DONE (Session 32)** |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
-| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — API/CLI already accept `repositories` (done with A1/A2); remaining: dashboard run form |
+| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — **✅ DONE (Session 33)**: dashboard run form + run-detail multi-repo surface |
 | 5 | B/D/E | hardening + polish (B1 needs a user infra decision) |
 
 ---
@@ -168,6 +190,16 @@ Close the execution gap on top of the org graph.
   4 in `test_phase20_multi_repo_run.py`);**
   **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`);**
   **✅ A5 covered (13 tests in `tests/test_phase20_repo_ingestion.py`).**
-- Full deterministic suite stays green (**1640 passed / 18 skipped / 1 pre-existing
+- Full deterministic suite stays green (**1655 passed / 18 skipped / 1 pre-existing
   env failure**).
 - `scripts/demo_phase20.py` demos A–G ALL PASS (deterministic, no paid LLM).
+
+---
+
+## 6. Next
+
+**Phase 20B hardening** (production reliability): B1 needs a user infra decision
+(billing on the Gemini key or Vertex AI); B2 typed fallback lists per capability;
+B3 mid-stream token-loss failover. Then workstream D (org-graph UI parity on the
+React Flow engine) and E (extra test-framework parsers). Workstream C (live E2E)
+re-runs after a Gemini quota reset.

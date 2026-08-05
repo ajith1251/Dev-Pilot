@@ -329,8 +329,10 @@ class TestGeminiProvider:
 
         # After the TTL (midnight reset) the marker is pruned and the
         # preferred model is tried again — no restart required.
+        # Simulate a full second PAST the TTL so float rounding at the exact
+        # `now - ts == ttl` boundary can never flip the `>=` prune.
         with patch("app.llm.providers.gemini.time.monotonic",
-                    return_value=marked_at + 3600.0):
+                    return_value=marked_at + 3601.0):
             assert provider._first_available("gemini-3.6-flash") == \
                 "gemini-3.6-flash"
         assert "gemini-3.6-flash" not in provider._exhausted_at
@@ -369,8 +371,10 @@ class TestGeminiProvider:
         provider._exhausted_at["gemini-3.6-flash"] = marked_at
 
         # Midnight reset: _resolve_model prunes and picks the default again.
+        # Simulate a full second PAST the TTL so float rounding at the exact
+        # `now - ts == ttl` boundary can never flip the `>=` prune.
         with patch("app.llm.providers.gemini.time.monotonic",
-                    return_value=marked_at + 3600.0):
+                    return_value=marked_at + 3601.0):
             assert provider._resolve_model(LLMConfig()) == "gemini-3.6-flash"
         assert provider._exhausted_at == {}
         assert provider._exhausted_models == set()

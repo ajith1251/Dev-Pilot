@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 32 — Phase 20 slice A5: per-repo EKG ingestion)
-> **Current Phase**: Phase 20 (slices A1+A2+A3+A4+A5 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`; next slice A6 — dashboard run form aux repos). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1640 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **51 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 13 (`test_phase20_repo_ingestion.py`). `scripts/demo_phase20.py` demos A–G ALL PASS.
+> **Last updated**: August 5, 2026 (session 33 — Phase 20 slice A6: dashboard aux-repo surface)
+> **Current Phase**: Phase 20 (slices A1+A2+A3+A4+A5+A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card; next Phase 20B hardening). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1655 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2213,4 +2213,67 @@ regressions. `scripts/demo_phase20.py` demos A–G ALL PASS against live PG
 **Next:** slice A6 — dashboard run form exposes optional auxiliary
 repositories (API/CLI already accept `repositories`/`repo_patches` from
 A1/A2/A4; only the frontend surface remains).
+
+### Session 33 (August 5, 2026) — Phase 20 slice A6: Dashboard Aux-Repo + Run-Detail Multi-Repo Surface 🚀
+
+Sixth (final) slice of Phase 20 workstream A: the multi-repo vertical is now
+fully surfaced end-to-end in the dashboard. A1/A2 wired the create-side API/CLI
+(`repositories`/`--aux-repo`), A4 added `repo_patches`, and A5 ingested
+per-repo evidence; A6 closes the two remaining UI + read-API gaps so an operator
+can create a multi-repo run from the form and see the per-repo validation
+outcome on the run-detail page.
+
+**Backend — run-detail API surface:**
+
+- `_sanitize_run` (`backend/app/api/v1/orchestration.py`) now exposes
+  `auxiliary_repositories` (the raw materialized spec list, with
+  `repository_id`/`namespace_id`/`path`/`source_type`) and `repo_validation`
+  (`[r.summary() for r in run.repo_patches]`, i.e. per-repo
+  status/changes/changed_files/errors) on `GET /api/v1/runs/{id}`. The
+  create-side `repositories` field was already present from A1/A2.
+
+**Frontend:**
+
+- `frontend/src/lib/api/client.ts`: new `AuxiliaryRepositorySpec` type
+  (mirrors backend `RepositorySpec`/`MultiRepoAcquisitionSpec` — local|github,
+  owner/repo/ref/depth, relationships) and `RepositoryPatchValidation` type;
+  `RunDetail`/`RunResult` gained optional `auxiliary_repositories` +
+  `repo_validation`; `runsApi.create` accepts optional `repositories`.
+- `CreateRunModal` (`dashboard/runs/page.tsx`): aux-repo editor with dynamic
+  add/remove rows — each row is a local path OR a github owner/repo/ref;
+  invalid rows (no id, or local without path, or github without owner+repo) are
+  dropped client-side before submit; rows submitted as `repositories` only when
+  non-empty.
+- Run-detail page (`dashboard/runs/[id]/page.tsx`): Source card now lists the
+  auxiliary repositories, and a new "Repository Validation" card renders each
+  repo's validation/application status, changes applied/attempted, changed
+  files (first 10, truncated), and first validation error.
+
+**Tests:**
+
+- `TestRunDetailApiSurface` (2 tests) added to
+  `tests/test_phase20_repo_ingestion.py` (now 15 total): asserts `_sanitize_run`
+  emits the new fields and that `GET /api/v1/runs/{id}` returns them through the
+  HTTP client.
+- New `frontend/src/lib/api/client.test.ts` (2 tests, fetch-mocked): verifies
+  `runsApi.create` forwards auxiliary `repositories` verbatim and omits them
+  when none supplied.
+- Hardened a second TTL-boundary flake: `test_exhausted_marker_expires_after_ttl`
+  simulated exactly `marked_at + ttl`, but the provider prunes with
+  `now - ts >= ttl`, so float rounding at the boundary could flip the `>=`;
+  now uses `marked_at + 3601.0` (matching the earlier fix to
+  `test_chat_recovers_preferred_model_after_ttl`).
+
+**Validation:** targeted suite (llm_providers, phase20_repo_ingestion,
+api_contract, api_durability, phase20_repo_scope) **83 passed / 1 known env
+failure**; full deterministic suite **1655 passed / 18 skipped / 1
+pre-existing env failure** (`test_wrapper_skips_cleanly_without_provider`);
+frontend vitest **39/39** (6 files); `next build` EXIT=0;
+`scripts/demo_phase20.py` demos A–G ALL PASS against live PG.
+
+**Next:** Phase 20B hardening — B1 (billing/Vertex AI) needs a user infra
+decision, B2 typed fallback lists per capability, B3 mid-stream token-loss
+failover; then workstream D (org-graph UI parity on the React Flow engine) and
+E (extra test-framework parsers); workstream C live E2E after a Gemini quota
+reset.
 

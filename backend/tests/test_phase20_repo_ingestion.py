@@ -43,6 +43,7 @@ from app.models.issues import (
     StructuredRequirements,
 )
 from app.models.orchestration import (
+    DevPilotRun,
     RepositoryPatchInput,
     RepositoryPatchResult,
     RepositorySpec,
@@ -462,3 +463,80 @@ class TestIngestIntoGraphRouting:
             and e.target_id == "REPO::repo-b"
             for e in org._org_graph.get_edges(run_node.node_id)
         )
+
+
+class TestRunDetailApiSurface:
+    """Phase 20 slice A6 — the run-detail API exposes the multi-repo surface
+    (`auxiliary_repositories` + per-repo `repo_validation`) so the dashboard can
+    render it."""
+
+    def _run(self) -> DevPilotRun:
+        return DevPilotRun(
+            run_id="RUN-A6-1",
+            source=RunSource(
+                source_type=RunSourceType.USER_TASK,
+                title="A6 task",
+                repository_path="/tmp/primary",
+            ),
+            auxiliary_repositories=[
+                {
+                    "repository_id": "repo-b",
+                    "namespace_id": "repo-b",
+                    "organization_id": "default",
+                    "name": "repo-b",
+                    "path": "/tmp/repo-b",
+                    "source_type": "local",
+                }
+            ],
+            repo_patches=[
+                RepositoryPatchResult(
+                    repository_id="repo-b",
+                    repository_namespace="repo-b",
+                    workspace_path="/tmp/repo-b",
+                    validation_status="validated",
+                    application_status="applied",
+                    changes_applied=1,
+                    changes_attempted=1,
+                    changed_files=["feature.py"],
+                )
+            ],
+        )
+
+    def test_sanitize_run_exposes_auxiliary_repositories_and_repo_validation(self):
+        from app.api.v1.orchestration import _sanitize_run
+
+        data = _sanitize_run(self._run())
+        assert data["auxiliary_repositories"] == [
+            {
+                "repository_id": "repo-b",
+                "namespace_id": "repo-b",
+                "organization_id": "default",
+                "name": "repo-b",
+                "path": "/tmp/repo-b",
+                "source_type": "local",
+            }
+        ]
+        assert data["repo_validation"][0]["repository_id"] == "repo-b"
+        assert data["repo_validation"][0]["validation_status"] == "validated"
+        assert data["repo_validation"][0]["changed_files"] == ["feature.py"]
+
+    def test_get_run_endpoint_returns_phase20_surface(self):
+        from fastapi.testclient import TestClient
+
+        import app.api.v1.orchestration as orchestration_module
+        from app.main import app
+
+        run = self._run()
+
+        async def _fake_get_run(run_id):
+            return run
+
+        with TestClient(app) as client, \
+             patch.object(orchestration_module, "workflow", MagicMock()) as wf:
+            wf.get_run = AsyncMock(side_effect=_fake_get_run)
+            resp = client.get("/api/v1/runs/RUN-A6-1")
+            assert resp.status_code == 200
+            data = resp.json()["data"]
+            assert data["auxiliary_repositories"][0]["repository_id"] == "repo-b"
+            assert data["repo_validation"][0]["repository_id"] == "repo-b"
+            assert data["repo_validation"][0]["changed_files"] == ["feature.py"]

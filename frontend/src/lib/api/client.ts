@@ -34,6 +34,42 @@ export interface RunSource {
   issue_url?: string;
 }
 
+/** Auxiliary repository spec for a Phase 20 multi-repo run (mirrors backend
+ * `RepositorySpec` / org-graph `MultiRepoAcquisitionSpec`). */
+export interface AuxiliaryRepositorySpec {
+  repository_id: string;
+  name?: string;
+  source?: "local" | "github";
+  owner?: string;
+  repo?: string;
+  path?: string;
+  ref?: string;
+  depth?: number;
+  relationships?: Array<{
+    target_repository_id: string;
+    relationship: string;
+    weight?: number;
+  }>;
+}
+
+/** Per-repository validation/application summary (Phase 20A4/A5). */
+export interface RepositoryPatchValidation {
+  repository_id: string;
+  repository_namespace: string;
+  workspace_path?: string;
+  patch_id?: string;
+  validation_status: string;
+  validation_errors: string[];
+  application_status: string;
+  application_errors: string[];
+  rejected_paths: string[];
+  deterministic_findings: string[];
+  changes_applied: number;
+  changes_attempted: number;
+  changed_files: string[];
+  status: string;
+}
+
 export interface StageResult {
   stage: string;
   status: string;
@@ -79,6 +115,8 @@ export interface RunDetail {
   warnings: string[];
   total_duration_ms?: number | null;
   cancellation_requested: boolean;
+  auxiliary_repositories?: Array<Record<string, unknown>>;
+  repo_validation?: RepositoryPatchValidation[];
 }
 
 export interface RunResult {
@@ -93,6 +131,8 @@ export interface RunResult {
   started_at?: string | null;
   finished_at?: string | null;
   duration_seconds?: number | null;
+  auxiliary_repositories?: Array<Record<string, unknown>>;
+  repo_validation?: RepositoryPatchValidation[];
 }
 
 export interface RunListStats {
@@ -322,6 +362,7 @@ export const runsApi = {
     source?: string;
     issue_number?: number;
     workspace_root?: string;
+    repositories?: AuxiliaryRepositorySpec[];
   }): Promise<{ success: boolean; data: RunResult }> {
     return request("/api/v1/runs", {
       method: "POST",

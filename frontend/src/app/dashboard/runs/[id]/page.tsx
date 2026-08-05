@@ -10,6 +10,7 @@ import type {
   StageType,
   StageResult,
   RunEvent,
+  RepositoryPatchValidation,
 } from "@/lib/api/client";
 
 // Reusable failure type matching the API client's RunDetail
@@ -502,6 +503,8 @@ function normalizeRunData(data: {
   warnings?: string[];
   total_duration_ms?: number | null;
   cancellation_requested?: boolean;
+  auxiliary_repositories?: Array<Record<string, unknown>>;
+  repo_validation?: RepositoryPatchValidation[];
 }): {
   run_id: string;
   status: RunStatus;
@@ -520,6 +523,8 @@ function normalizeRunData(data: {
   warnings: string[];
   total_duration_ms: number | null;
   cancellation_requested: boolean;
+  auxiliary_repositories: Array<Record<string, unknown>>;
+  repo_validation: RepositoryPatchValidation[];
 } {
   return {
     run_id: data.run_id,
@@ -539,6 +544,8 @@ function normalizeRunData(data: {
     warnings: data.warnings || [],
     total_duration_ms: data.total_duration_ms || null,
     cancellation_requested: data.cancellation_requested || false,
+    auxiliary_repositories: data.auxiliary_repositories || [],
+    repo_validation: data.repo_validation || [],
   };
 }
 
@@ -568,6 +575,8 @@ export default function RunDetailPage() {
     warnings: string[];
     total_duration_ms?: number | null;
     cancellation_requested: boolean;
+    auxiliary_repositories?: Array<Record<string, unknown>>;
+    repo_validation?: RepositoryPatchValidation[];
   }
 
   const [run, setRun] = useState<RunData | null>(null);
@@ -803,6 +812,28 @@ export default function RunDetailPage() {
                   <span className="text-slate-900 dark:text-white">#{run.source.issue_number}</span>
                 </div>
               )}
+              {(run.auxiliary_repositories?.length ?? 0) > 0 && (
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400">Aux Repositories: </span>
+                  <ul className="mt-1 space-y-1">
+                    {run.auxiliary_repositories?.map((aux) => {
+                      const rid = String(aux.repository_id ?? aux.namespace_id ?? "?");
+                      const loc = String(aux.path || aux.owner || aux.repo || "");
+                      return (
+                        <li key={rid} className="text-slate-900 dark:text-white font-mono text-[11px]">
+                          {rid}
+                          {loc && <span className="text-slate-400 dark:text-slate-500"> · {loc}</span>}
+                          {aux.source_type ? (
+                            <span className="ml-1 text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                              {String(aux.source_type)}
+                            </span>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
               {run.total_duration_ms != null && (
                 <div>
                   <span className="text-slate-500 dark:text-slate-400">Total Duration: </span>
@@ -811,6 +842,49 @@ export default function RunDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Repository Validation (Phase 20 A4/A5) */}
+          {(run.repo_validation?.length ?? 0) > 0 && (
+            <div className="rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-3">Repository Validation</h3>
+              <div className="space-y-2">
+                {run.repo_validation?.map((rv) => {
+                  const ok =
+                    rv.validation_status === "validated" &&
+                    rv.application_status !== "rejected";
+                  return (
+                    <div key={rv.repository_id} className="rounded-lg border border-slate-200 dark:border-slate-700 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs text-slate-900 dark:text-white">{rv.repository_id}</span>
+                        <span
+                          className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                            ok
+                              ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400"
+                              : "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400"
+                          }`}
+                        >
+                          {rv.validation_status}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>applied: <span className="text-slate-900 dark:text-white">{rv.application_status}</span></span>
+                        <span>changes: <span className="text-slate-900 dark:text-white">{rv.changes_applied}/{rv.changes_attempted}</span></span>
+                      </div>
+                      {(rv.changed_files?.length ?? 0) > 0 && (
+                        <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                          files: <span className="text-slate-900 dark:text-white font-mono">{rv.changed_files.slice(0, 10).join(", ")}</span>
+                          {rv.changed_files.length > 10 ? "…" : ""}
+                        </div>
+                      )}
+                      {rv.validation_errors?.length ? (
+                        <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{rv.validation_errors[0]}</p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Failure Detail */}
           {run.failure && (

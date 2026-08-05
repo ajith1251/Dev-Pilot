@@ -10,6 +10,7 @@ import type {
   StageType,
   RunSummary,
   Capabilities,
+  AuxiliaryRepositorySpec,
 } from "@/lib/api/client";
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -572,11 +573,39 @@ function CreateRunModal({ onClose, onCreated }: {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [repo, setRepo] = useState("");
+  const [auxRepos, setAuxRepos] = useState<AuxiliaryRepositorySpec[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const setAuxRepo = useCallback((i: number, patch: Partial<AuxiliaryRepositorySpec>) => {
+    setAuxRepos((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }, []);
+
+  const removeAuxRepo = useCallback((i: number) => {
+    setAuxRepos((prev) => prev.filter((_, idx) => idx !== i));
+  }, []);
+
   const handleCreate = useCallback(async () => {
     if (!title.trim()) { setError("Title is required"); return; }
+    // Drop empty/incomplete aux-repo rows (a row needs an id AND a location).
+    const repositories = auxRepos
+      .map((r) => ({
+        repository_id: r.repository_id.trim(),
+        name: r.name?.trim() || undefined,
+        source: r.source || "local",
+        owner: r.source === "github" ? r.owner?.trim() || undefined : undefined,
+        repo: r.source === "github" ? r.repo?.trim() || undefined : undefined,
+        path: r.source === "local" ? r.path?.trim() || undefined : undefined,
+        ref: r.source === "github" ? r.ref?.trim() || undefined : undefined,
+        depth: r.source === "github" && r.depth ? r.depth : undefined,
+      }))
+      .filter(
+        (r) =>
+          r.repository_id &&
+          (r.source === "github"
+            ? Boolean(r.owner && r.repo)
+            : Boolean(r.path))
+      );
     setCreating(true);
     setError(null);
     try {
@@ -584,6 +613,7 @@ function CreateRunModal({ onClose, onCreated }: {
         title: title.trim(),
         description: description.trim(),
         repository: repo.trim() || undefined,
+        repositories: repositories.length > 0 ? repositories : undefined,
       });
       if (result.data?.run_id) {
         onCreated(result.data.run_id);
@@ -593,12 +623,12 @@ function CreateRunModal({ onClose, onCreated }: {
     } finally {
       setCreating(false);
     }
-  }, [title, description, repo, onCreated]);
+  }, [title, description, repo, auxRepos, onCreated]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-lg mx-4 p-6"
+        className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-xl mx-4 p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
@@ -638,6 +668,91 @@ function CreateRunModal({ onClose, onCreated }: {
               placeholder="/path/to/repo or GitHub URL"
               className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
             />
+          </div>
+
+          {/* Auxiliary repositories (Phase 20 A6) */}
+          <div className="pt-1">
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                Auxiliary Repositories <span className="text-slate-400 dark:text-slate-500">(optional)</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => setAuxRepos((prev) => [...prev, { repository_id: "", source: "local", depth: 1 }])}
+                className="text-[11px] font-medium text-primary-600 dark:text-primary-400 hover:text-primary-500 transition-colors"
+              >
+                + Add repo
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-2">
+              Additional repositories materialized via the org graph and kept isolated from the primary checkout.
+            </p>
+            <div className="space-y-2">
+              {auxRepos.length === 0 && (
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 italic">
+                  No auxiliary repositories — the run will target only the primary repository.
+                </p>
+              )}
+              {auxRepos.map((aux, i) => (
+                <div key={i} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text" value={aux.repository_id}
+                      onChange={(e) => setAuxRepo(i, { repository_id: e.target.value })}
+                      placeholder="repo-id (stable namespace)"
+                      className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                    />
+                    <select
+                      value={aux.source || "local"}
+                      onChange={(e) => setAuxRepo(i, { source: e.target.value as "local" | "github" })}
+                      className="px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                    >
+                      <option value="local">local</option>
+                      <option value="github">github</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => removeAuxRepo(i)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                      aria-label="Remove auxiliary repository"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  {aux.source === "github" ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      <input
+                        type="text" value={aux.owner || ""}
+                        onChange={(e) => setAuxRepo(i, { owner: e.target.value })}
+                        placeholder="owner"
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                      />
+                      <input
+                        type="text" value={aux.repo || ""}
+                        onChange={(e) => setAuxRepo(i, { repo: e.target.value })}
+                        placeholder="repo"
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                      />
+                      <input
+                        type="text" value={aux.ref || ""}
+                        onChange={(e) => setAuxRepo(i, { ref: e.target.value })}
+                        placeholder="ref (optional)"
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      type="text" value={aux.path || ""}
+                      onChange={(e) => setAuxRepo(i, { path: e.target.value })}
+                      placeholder="/path/to/auxiliary/repo"
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 

@@ -286,6 +286,8 @@ def _sanitize_run(run: Any) -> Dict[str, Any]:
         "warnings": run.warnings[:10],
         "total_duration_ms": run.total_duration_ms,
         "cancellation_requested": run.cancellation_requested,
+        "auxiliary_repositories": run.auxiliary_repositories,
+        "repo_validation": [r.summary() for r in run.repo_patches],
     }
 
 
