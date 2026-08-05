@@ -50,7 +50,10 @@ from app.services.controlled_execution_engine import ControlledExecutionEngine
 from app.services.execution_policy import ExecutionPolicy, create_default_policy
 from app.testing.parsers.base import TestResultParser
 from app.testing.parsers.generic_parser import GenericResultParser
+from app.testing.parsers.jest_json_parser import JestJsonParser
 from app.testing.parsers.pytest_parser import PytestResultParser
+from app.testing.parsers.unittest_xml_parser import UnittestXMLParser
+from app.testing.parsers.vitest_json_parser import VitestJsonParser
 
 
 class TestingService:
@@ -83,6 +86,9 @@ class TestingService:
         # Register parsers in priority order (most specific first)
         self._parsers = parsers or [
             PytestResultParser(),
+            UnittestXMLParser(),
+            VitestJsonParser(),
+            JestJsonParser(),
             GenericResultParser(),
         ]
 

@@ -1,6 +1,7 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: IN PROGRESS — slices A1–A6 DONE (Sessions 28–33), Phase 20B next
+> **Status**: COMPLETE — A1–A6 DONE (Sessions 28–33), Phase 20B DONE (Sessions 34/35/37),
+> workstream E DONE (Session 38)
 > **Date**: August 5, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
 > knowledge layer (EKG + organization graph) is now **cross-repository**, but the
@@ -199,6 +200,24 @@ Close the execution gap on top of the org graph.
 
 - Add pytest-style parsers for unittest XML / Vitest JSON / Jest JSON
   (`docs/TESTING_AND_EXECUTION.md:250` notes the current pytest-only parser).
+  **✅ DONE (Session 38):** three new dedicated parsers in
+  `backend/app/testing/parsers/` mirroring the `TestResultParser` contract —
+  `UnittestXMLParser` (`unittest_xml_parser.py`, JUnit-style `testsuites`/
+  `testsuite`/`testcase` XML via `xml.etree.ElementTree`; aggregates tests/
+  failures/errors/skipped, `failure`/`error`/`skipped` children, message +
+  `type` + traceback text, line-number extraction, module/class→path
+  heuristic), `VitestJsonParser` (`vitest_json_parser.py`, `testResults` +
+  `numTotalTests`/`numPassedTests`/`numFailedTests`/`numPendingTests`, suites
+  discriminated from Jest by the ABSENCE of `perfStats`), `JestJsonParser`
+  (`jest_json_parser.py`, same shape, discriminated by `perfStats` presence;
+  `failureMessages` → message + stack + line). Both JSON parsers locate JSON
+  embedded in surrounding runner text and never fabricate counts. Wired into
+  `TestingService._parsers` in priority order
+  (pytest → unittest → vitest → jest → generic fallback). 12 new tests in
+  `tests/test_testing.py` (4 unittest XML + 4 Vitest + 4 Jest incl. service
+  chain order); full suite **1696 passed / 18 skipped / 1 pre-existing env
+  failure**. Docs: `docs/TESTING_AND_EXECUTION.md` framework table updated
+  (unittest/Vitest/Jest rows now dedicated parsers).
 
 ---
 
@@ -210,7 +229,7 @@ Close the execution gap on top of the org graph.
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, **A5 ✅ DONE (Session 32)** |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
 | 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — **✅ DONE (Session 33)**: dashboard run form + run-detail multi-repo surface |
-| 5 | B/D/E | hardening + polish (**B1, B2, B3 ✅ DONE (Sessions 34/35/37)**; B2/B3 in `test_provider_router.py`, B1 paid tier in `test_llm_providers.py`) |
+| 5 | B/D/E | hardening + polish (**B1, B2, B3 ✅ DONE (Sessions 34/35/37)**; B2/B3 in `test_provider_router.py`, B1 paid tier in `test_llm_providers.py`; **D ✅ DONE (Session 36)**, **E ✅ DONE (Session 38)**) |
 
 ---
 
@@ -235,7 +254,7 @@ Close the execution gap on top of the org graph.
   4 in `test_phase20_multi_repo_run.py`);**
   **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`);**
   **✅ A5 covered (13 tests in `tests/test_phase20_repo_ingestion.py`).**
-- Full deterministic suite stays green (**1684 passed / 18 skipped / 1 pre-existing
+- Full deterministic suite stays green (**1696 passed / 18 skipped / 1 pre-existing
   env failure**).
 - `scripts/demo_phase20.py` demos A–G ALL PASS (deterministic, no paid LLM).
 
@@ -243,8 +262,9 @@ Close the execution gap on top of the org graph.
 
 ## 6. Next
 
-**Phase 20B COMPLETE**: B1 (paid Gemini tier, billing on the existing key —
-Session 37), B2 (typed per-capability fallbacks — Session 34) and B3
-(mid-stream token-loss failover — Session 35) are all DONE. Remaining:
-workstream E (extra test-framework parsers) and any polish; workstream C
-(live E2E) re-runs after a Gemini quota reset.
+**Phase 20 COMPLETE**: workstream A (multi-repo runs, Sessions 28–33), workstream B
+(B1 paid Gemini tier — Session 37; B2 typed fallbacks — Session 34; B3 mid-stream
+token-loss failover — Session 35), workstream D (org-graph UI parity — Session 36)
+and workstream E (unittest XML / Vitest JSON / Jest JSON parsers — Session 38) are
+all DONE. Remaining: workstream C (live E2E) re-runs after a Gemini quota reset
+now that a paid tier is available.

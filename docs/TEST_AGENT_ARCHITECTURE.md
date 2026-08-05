@@ -269,7 +269,14 @@ ControlledExecutionEngine.execute(step, workspace_root)
 | Parser | Framework | Test Counts | Failure Names | Stack Traces | Classification |
 |--------|-----------|-------------|---------------|--------------|----------------|
 | **PytestResultParser** | pytest | ✅ Full parsing | ✅ Extracted | ✅ Captured | ✅ 11 categories |
+| **UnittestXMLParser** | unittest (JUnit XML) | ✅ tests/failures/errors/skipped | ✅ Extracted | ✅ Captured | ✅ `classify_message` |
+| **VitestJsonParser** | Vitest (JSON) | ✅ numTotal/Passed/Failed/Pending | ✅ `fullName` + ancestors | ✅ failureMessages | ✅ `classify_message` |
+| **JestJsonParser** | Jest (JSON) | ✅ numTotal/Passed/Failed/Pending | ✅ `fullName` + ancestors | ✅ failureMessages | ✅ `classify_message` |
 | **GenericResultParser** | Fallback | ❌ Not parsed | ⚠️ Stderr text | ⚠️ Raw text | ⚠️ Exit code only |
+
+> Dispatch order in `TestingService`: pytest → unittest → vitest → jest → generic.
+> Vitest vs Jest JSON are discriminated by the `perfStats` key Jest suites always
+> carry (Vitest never does).
 
 ### 5. TestingService (`app/services/testing_service.py`)
 
@@ -453,6 +460,9 @@ Each node is an async function. The workflow wraps `TestingService.run_tests()` 
 | `app/services/execution_policy.py` | ExecutionPolicy — deterministic security gate |
 | `app/services/controlled_execution_engine.py` | ControlledExecutionEngine — safe subprocess execution |
 | `app/testing/parsers/pytest_parser.py` | PytestResultParser — full pytest output parsing |
+| `app/testing/parsers/unittest_xml_parser.py` | UnittestXMLParser — JUnit-style XML (unittest reporters) |
+| `app/testing/parsers/vitest_json_parser.py` | VitestJsonParser — Vitest JSON reporter |
+| `app/testing/parsers/jest_json_parser.py` | JestJsonParser — Jest JSON reporter |
 | `app/testing/parsers/generic_parser.py` | GenericResultParser — fallback parser |
 | `app/workflows/testing.py` | Testing workflow graph |
 | `app/api/v1/testing.py` | REST API endpoints |

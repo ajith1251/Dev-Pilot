@@ -242,12 +242,16 @@ Phase 7 reuses Phase 2 intelligence patterns. Detected configurations:
 | Framework | Parser | Test Counts | Failure Names | Failure Types | Classification |
 |-----------|--------|-------------|---------------|---------------|----------------|
 | **pytest** | Dedicated `PytestResultParser` | ✅ `X passed / Y failed / Z skipped` | ✅ Fully qualified test names | ✅ File, line number, message | ✅ ASSERTION, IMPORT, SYNTAX, TIMEOUT, etc. |
-| **unittest** | `GenericResultParser` fallback | ❌ Not parsed | ⚠️ Stderr text preserved | ⚠️ Stderr text preserved | ⚠️ `EXECUTION_ERROR` / `UNKNOWN` only |
-| **Vitest** | `GenericResultParser` fallback | ❌ Not parsed | ⚠️ Stderr text preserved | ⚠️ Stderr text preserved | ⚠️ `EXECUTION_ERROR` / `UNKNOWN` only |
-| **Jest** | `GenericResultParser` fallback | ❌ Not parsed | ⚠️ Stderr text preserved | ⚠️ Stderr text preserved | ⚠️ `EXECUTION_ERROR` / `UNKNOWN` only |
+| **unittest** | Dedicated `UnittestXMLParser` (JUnit XML from `xmlrunner` / `unittest-xml-reporting`) | ✅ `tests`/`failures`/`errors`/`skipped` attrs | ✅ `module.Class.test_name` + file path heuristic | ✅ Failure/error message, `type`, traceback, line number | ✅ `classify_message` on message + type + traceback |
+| **Vitest** | Dedicated `VitestJsonParser` (`--reporter=json`) | ✅ `numTotalTests` / `numPassedTests` / `numFailedTests` / `numPendingTests` | ✅ `fullName` + ancestor titles | ✅ File (suite `name`), line number, failure messages | ✅ `classify_message` on first failure message |
+| **Jest** | Dedicated `JestJsonParser` (`--json`) | ✅ `numTotalTests` / `numPassedTests` / `numFailedTests` / `numPendingTests` | ✅ `fullName` + ancestor titles | ✅ File (suite `name`), line number, `failureMessages` + stack | ✅ `classify_message` on first failure message |
 | **Generic** | `GenericResultParser` | ❌ Not parsed | ⚠️ Raw stdout/stderr | ⚠️ Raw stdout/stderr | ⚠️ Exit code + stderr heuristics |
 
-> **Note:** Phase 7 has a dedicated, full-featured parser for **pytest** only. Other frameworks fall back to a generic parser that preserves raw stdout/stderr and classifies by exit code. Adding framework-specific parsers (unittest XML, Vitest JSON, Jest JSON) is a natural extension point for future phases.
+> **Note:** Phase 7 has dedicated parsers for **pytest**, **unittest** (JUnit XML),
+> **Vitest** (JSON) and **Jest** (JSON). Vitest and Jest JSON output share the same
+> top-level shape; they are discriminated by the `perfStats` key that Jest suites
+> always carry (Vitest never does). Unknown frameworks fall back to a generic
+> parser that preserves raw stdout/stderr and classifies by exit code.
 
 ---
 

@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 37 — Phase 20B COMPLETE: B1 paid Gemini tier, billing on the existing key)
-> **Current Phase**: Phase 20B COMPLETE ✅ (B1 DONE Session 37: `DEVPILOT_GEMINI_TIER` free|paid + optional `DEVPILOT_GEMINI_PAID_MODELS` — paid tier keeps `GEMINI_API_KEY` (same key format, billing attached in AI Studio), disables free-tier daily-quota failover + 24h exhaustion markers, fails fast on genuine billing/quota errors, still retries transient 429s; `GET /api/v1/providers/config` exposes `data.gemini.{tier,paid_models}`, `POST /api/v1/providers/test` returns `gemini_tier`/`gemini_models`; 12 new tests. B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list. B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`). Phase 20 Workstream D COMPLETE (Session 36: `/dashboard/organization-graph` migrated onto `InteractiveGraph.tsx` + timeline diff + live WS; legacy `ForceDirectedGraph.tsx` deleted; pure mappers in `frontend/src/lib/graph/orgGraphModel.ts`; frontend vitest 49 passed (7 files), `next build` EXIT=0). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1684 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **29 new tests** — B1: 12 (5 paid-tier provider in `test_llm_providers.py` + 6 Gemini tier config + 1 router `config_snapshot`), B2: 12 (7 router capability fallbacks + 4 config parsing + 1 planner wiring), B3: 5 (4 stream-resume behaviour + 1 config parse; `test_provider_router.py` now 60). `scripts/demo_phase20.py` demos A–G ALL PASS.
+> **Last updated**: August 5, 2026 (session 38 — Phase 20 COMPLETE: workstream E extra test-framework parsers)
+> **Current Phase**: Phase 20 COMPLETE ✅ — Workstream E DONE Session 38: dedicated test-result parsers for **unittest** (JUnit-style XML), **Vitest** (JSON) and **Jest** (JSON) in `backend/app/testing/parsers/` (`UnittestXMLParser` / `VitestJsonParser` / `JestJsonParser`), wired into the `TestingService` chain before the generic fallback; 12 new tests; full suite **1696 passed / 18 skipped / 1 failed**. (Earlier: B1 DONE Session 37: `DEVPILOT_GEMINI_TIER` free|paid + optional `DEVPILOT_GEMINI_PAID_MODELS` — paid tier keeps `GEMINI_API_KEY` (same key format, billing attached in AI Studio), disables free-tier daily-quota failover + 24h exhaustion markers, fails fast on genuine billing/quota errors, still retries transient 429s; `GET /api/v1/providers/config` exposes `data.gemini.{tier,paid_models}`, `POST /api/v1/providers/test` returns `gemini_tier`/`gemini_models`; 12 new tests. B2 DONE Session 34: `Capability` enum + `LLMConfig.capability` + `DEVPILOT_LLM_PROVIDER_FALLBACKS` typed chains — each agent stage routes through its own provider list. B3 DONE Session 35: mid-stream token-loss failover — `chat_stream` resumes a stream that drops after delivering tokens on the next provider with the partial output as continuation context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`). Phase 20 Workstream D COMPLETE (Session 36: `/dashboard/organization-graph` migrated onto `InteractiveGraph.tsx` + timeline diff + live WS; legacy `ForceDirectedGraph.tsx` deleted; pure mappers in `frontend/src/lib/graph/orgGraphModel.ts`; frontend vitest 49 passed (7 files), `next build` EXIT=0). Phase 20 slices A1–A6 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31, commit `e1fc08e`), per-repo EKG ingestion (A5, Session 32 — `record_run_across_namespaces` ingests each per-repo patch into its own namespace + cross-namespace run links, `RepositoryPatchResult.changed_files`, missing-`await` bug fixed in `_validate_single_repo_patch`), dashboard aux-repo + run-detail multi-repo surface (A6, Session 33 — `_sanitize_run` exposes `auxiliary_repositories` + `repo_validation`, `CreateRunModal` aux-repo editor, Repository Validation card). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1696 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **53 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), A6 frontend: 2 (`frontend/src/lib/api/client.test.ts`). Phase 20B: **29 new tests** — B1: 12 (5 paid-tier provider in `test_llm_providers.py` + 6 Gemini tier config + 1 router `config_snapshot`), B2: 12 (7 router capability fallbacks + 4 config parsing + 1 planner wiring), B3: 5 (4 stream-resume behaviour + 1 config parse; `test_provider_router.py` now 60). Phase 20E: **12 new tests** — `TestUnittestXMLParser` (4) + `TestVitestJsonParser` (4) + `TestJestJsonParser` (4, incl. service-chain order) in `test_testing.py`. `scripts/demo_phase20.py` demos A–G ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2483,5 +2483,62 @@ E (extra test-framework parsers); workstream C (live E2E:
 `scripts/demo_phase17.py --live`, `scripts/verify_api_durability.py --live`)
 re-runs after a Gemini quota reset — a paid tier now makes unlimited runs
 possible without waiting for the daily reset.
+
+
+### Session 38 (August 5, 2026) — Phase 20 workstream E: unittest XML / Vitest JSON / Jest JSON parsers ✅
+
+**Goal:** close the last Phase 20 workstream — replace the pytest-only parser
+with dedicated parsers for the frameworks the docs had listed as falling back
+to `GenericResultParser` (`docs/TESTING_AND_EXECUTION.md:250`).
+
+**Changes.**
+
+- **`backend/app/testing/parsers/unittest_xml_parser.py`** (new) —
+  `UnittestXMLParser` parses JUnit-style XML from `xmlrunner` /
+  `unittest-xml-reporting`: `testsuites`/`testsuite` root via
+  `xml.etree.ElementTree`; aggregates `tests`/`failures`/`errors`/`skipped`
+  (top-level attrs preferred, suite sum fallback, passed = total − failed −
+  skipped); per-`testcase` `failure`/`error`/`skipped` children →
+  `TestFailure` with `module.Class.test_name`, module/class→path heuristic
+  (`tests.test_example.Tests` → `tests/test_example.py`), message + `type` +
+  traceback text, `line N` extraction, and `classify_message` on
+  type+message+traceback.
+- **`backend/app/testing/parsers/vitest_json_parser.py`** (new) —
+  `VitestJsonParser` parses `--reporter=json` output: top-level
+  `numTotalTests`/`numPassedTests`/`numFailedTests`/`numPendingTests`, per-suite
+  `testResults` (suite `name` → file path), per-assertion `fullName` +
+  `ancestorTitles` + `failureMessages` (message, stack, first `path:line:col` →
+  line number). Discriminates from Jest by the ABSENCE of `perfStats` on suites
+  (Vitest never emits it). JSON located even when embedded in runner text;
+  counts never fabricated.
+- **`backend/app/testing/parsers/jest_json_parser.py`** (new) — `JestJsonParser`
+  parses `--json` output with the same top-level shape, discriminated by
+  `perfStats` PRESENCE; `failureMessages` stack frames give file/line.
+- **`backend/app/services/testing_service.py`** — default parser chain is now
+  `PytestResultParser → UnittestXMLParser → VitestJsonParser → JestJsonParser →
+  GenericResultParser` (most specific first; generic still the unconditional
+  fallback).
+
+**Files:** `backend/app/testing/parsers/unittest_xml_parser.py`,
+`backend/app/testing/parsers/vitest_json_parser.py`,
+`backend/app/testing/parsers/jest_json_parser.py` (all new),
+`backend/app/services/testing_service.py`, `backend/tests/test_testing.py`
+(+12 tests: `TestUnittestXMLParser` 4, `TestVitestJsonParser` 4,
+`TestJestJsonParser` 4 incl. `test_default_service_registers_all_parsers` chain
+order).
+
+**Validation:** targeted parser tests 22 passed; `tests/test_testing.py` 106
+passed; full deterministic suite (`-m "not live"`) **1696 passed / 18 skipped /
+1 failed** (only the pre-existing `test_wrapper_skips_cleanly_without_provider`
+env quirk). Docs updated: `docs/TESTING_AND_EXECUTION.md` framework table
+(unittest/Vitest/Jest rows now dedicated parsers), `README.md` (workstream E
+blurb + counts 1696), `workflow-status/PHASE20_ROADMAP.md` (E ✅, Phase 20
+COMPLETE). Frontend untouched (E is backend only).
+
+**Next:** **Phase 20 is COMPLETE** (A1–A6, B1–B3, D, E). Remaining: workstream C
+(live E2E: `scripts/demo_phase17.py --live`,
+`scripts/verify_api_durability.py --live`) re-runs after a Gemini quota reset —
+a paid tier now makes unlimited runs possible without waiting for the daily
+reset.
 
 

@@ -58,6 +58,9 @@ from app.services.execution_policy import (
 from app.services.controlled_execution_engine import ControlledExecutionEngine
 from app.testing.parsers.pytest_parser import PytestResultParser
 from app.testing.parsers.generic_parser import GenericResultParser
+from app.testing.parsers.jest_json_parser import JestJsonParser
+from app.testing.parsers.unittest_xml_parser import UnittestXMLParser
+from app.testing.parsers.vitest_json_parser import VitestJsonParser
 from app.services.testing_service import TestingService
 
 
@@ -738,6 +741,422 @@ class TestGenericResultParser:
         _, _, _, _, _, failures = self.parser.parse(result)
         if failures:
             assert failures[0].failure_type == FailureCategory.IMPORT_ERROR
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5b. UNITTEST XML PARSER TESTS
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestUnittestXMLParser:
+    """Test the JUnit-style XML parser for unittest reporters."""
+
+    def setup_method(self):
+        self.parser = UnittestXMLParser()
+
+    def _result(self, xml, exit_code=0):
+        return ProcessExecutionResult(
+            step_id="STEP-001",
+            command="python -m xmlrunner discover",
+            category=CommandCategory.TEST,
+            status=ExecutionStatus.FAILED if exit_code else ExecutionStatus.PASSED,
+            exit_code=exit_code,
+            stdout=xml,
+        )
+
+    def test_can_parse_detection(self):
+        """can_parse recognizes testsuites/testsuite XML and rejects others."""
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<testsuites tests="3" failures="1" errors="0" skipped="1">\n'
+            '  <testsuite name="tests.test_example" tests="3" failures="1" '
+            'errors="0" skipped="1" time="0.1">\n'
+            '    <testcase classname="tests.test_example" name="test_alpha"/>\n'
+            '  </testsuite>\n'
+            '</testsuites>\n'
+        )
+        assert self.parser.can_parse(self._result(xml))
+
+        # Pure text is not XML
+        assert not self.parser.can_parse(self._result("Hello, world!\n"))
+
+        # Malformed XML is rejected
+        assert not self.parser.can_parse(self._result("<testsuites><broken>"))
+
+    def test_parse_passing_output(self):
+        """Parse an all-passing unittest XML report."""
+        xml = (
+            '<testsuites tests="2" failures="0" errors="0" skipped="0" time="0.02">\n'
+            '  <testsuite name="tests.test_example" tests="2" errors="0" '
+            'failures="0" skipped="0" time="0.02">\n'
+            '    <testcase classname="tests.test_example" name="test_alpha" time="0.01"/>\n'
+            '    <testcase classname="tests.test_example" name="test_beta" time="0.01"/>\n'
+            '  </testsuite>\n'
+            '</testsuites>\n'
+        )
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(xml, exit_code=0)
+        )
+
+        assert status == ExecutionStatus.PASSED
+        assert total == 2
+        assert passed == 2
+        assert failed == 0
+        assert skipped == 0
+        assert len(failures) == 0
+
+    def test_parse_failing_output(self):
+        """Parse a failing unittest XML report with a traceback."""
+        xml = (
+            '<testsuites tests="4" failures="1" errors="1" skipped="1" time="0.1">\n'
+            '  <testsuite name="tests.test_failures" tests="4" errors="1" '
+            'failures="1" skipped="1" time="0.1">\n'
+            '    <testcase classname="tests.test_failures" name="test_assert" time="0.01">\n'
+            '      <failure message="AssertionError: 1 != 2" type="AssertionError">'
+            "Traceback (most recent call last):\n"
+            '  File "tests/test_failures.py", line 12, in test_assert\n'
+            "AssertionError: 1 != 2\n"
+            '</failure>\n'
+            '    </testcase>\n'
+            '    <testcase classname="tests.test_failures" name="test_boom" time="0.01">\n'
+            '      <error message="ImportError: no module named nope" type="ImportError">'
+            "ImportError: no module named nope\n"
+            '</error>\n'
+            '    </testcase>\n'
+            '    <testcase classname="tests.test_failures" name="test_skip" time="0.0">\n'
+            '      <skipped message="needs network"/>\n'
+            '    </testcase>\n'
+            '    <testcase classname="tests.test_failures" name="test_ok" time="0.01"/>\n'
+            '  </testsuite>\n'
+            '</testsuites>\n'
+        )
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(xml, exit_code=1)
+        )
+
+        assert status == ExecutionStatus.FAILED
+        assert total == 4
+        assert passed == 1
+        assert failed == 2
+        assert skipped == 1
+        assert len(failures) == 2
+
+        f1 = failures[0]
+        assert f1.framework == "unittest"
+        assert f1.test_name == "tests.test_failures.test_assert"
+        assert f1.file_path == "tests/test_failures.py"
+        assert f1.line_number == 12
+        assert f1.failure_type == FailureCategory.ASSERTION_FAILURE
+        assert "AssertionError: 1 != 2" in f1.message
+        assert f1.stack_trace and "tests/test_failures.py" in f1.stack_trace
+
+        f2 = failures[1]
+        assert f2.failure_type in (
+            FailureCategory.IMPORT_ERROR, FailureCategory.EXECUTION_ERROR
+        )
+
+    def test_parse_single_testsuite_root(self):
+        """Parse a report whose root element is <testsuite> (no wrapper)."""
+        xml = (
+            '<testsuite name="tests.test_example" tests="1" errors="0" '
+            'failures="1" skipped="0" time="0.01">\n'
+            '    <testcase classname="tests.test_example" name="test_bad" time="0.01">\n'
+            '      <failure message="expected 5 but got 4" type="AssertionError">'
+            "AssertionError: expected 5 but got 4\n"
+            '</failure>\n'
+            '    </testcase>\n'
+            '</testsuite>\n'
+        )
+        assert self.parser.can_parse(self._result(xml))
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(xml, exit_code=1)
+        )
+        assert status == ExecutionStatus.FAILED
+        assert total == 1
+        assert failed == 1
+        assert passed == 0
+        assert len(failures) == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5c. VITEST JSON PARSER TESTS
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestVitestJsonParser:
+    """Test the Vitest JSON reporter parser."""
+
+    def setup_method(self):
+        self.parser = VitestJsonParser()
+
+    def _result(self, payload, exit_code=0):
+        stdout = payload if isinstance(payload, str) else __import__("json").dumps(payload)
+        return ProcessExecutionResult(
+            step_id="STEP-001",
+            command="npx vitest run --reporter=json",
+            category=CommandCategory.TEST,
+            status=ExecutionStatus.FAILED if exit_code else ExecutionStatus.PASSED,
+            exit_code=exit_code,
+            stdout=stdout,
+        )
+
+    def _passing(self):
+        return {
+            "numTotalTestSuites": 1,
+            "numPassedTestSuites": 1,
+            "numFailedTestSuites": 0,
+            "numTotalTests": 2,
+            "numPassedTests": 2,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "success": True,
+            "testResults": [
+                {
+                    "name": "/ws/tests/math.test.ts",
+                    "startTime": 100,
+                    "duration": 12,
+                    "status": "passed",
+                    "assertionResults": [
+                        {
+                            "duration": 10,
+                            "title": "adds 1 + 2 to equal 3",
+                            "fullName": "math > adds 1 + 2 to equal 3",
+                            "ancestorTitles": ["math"],
+                            "status": "passed",
+                            "meta": {},
+                        },
+                        {
+                            "duration": 2,
+                            "title": "subtracts 5 - 2 to equal 3",
+                            "fullName": "math > subtracts 5 - 2 to equal 3",
+                            "ancestorTitles": ["math"],
+                            "status": "passed",
+                            "meta": {},
+                        },
+                    ],
+                }
+            ],
+        }
+
+    def test_can_parse_detection(self):
+        """can_parse detects Vitest JSON and rejects Jest JSON / text."""
+        assert self.parser.can_parse(self._result(self._passing()))
+
+        # Jest JSON (has perfStats) must NOT be claimed by Vitest
+        jest = self._passing()
+        jest["testResults"][0]["perfStats"] = {"runtime": 12, "slow": False}
+        assert not self.parser.can_parse(self._result(jest))
+
+        assert not self.parser.can_parse(self._result("just some output"))
+
+    def test_parse_passing_output(self):
+        """Parse an all-passing Vitest report."""
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(self._passing())
+        )
+        assert status == ExecutionStatus.PASSED
+        assert total == 2
+        assert passed == 2
+        assert failed == 0
+        assert skipped == 0
+        assert len(failures) == 0
+
+    def test_parse_failing_output(self):
+        """Parse a failing Vitest report with failure messages."""
+        payload = self._passing()
+        payload["numFailedTests"] = 1
+        payload["numTotalTests"] = 3
+        payload["numPendingTests"] = 1
+        payload["testResults"][0]["assertionResults"][0]["status"] = "failed"
+        payload["testResults"][0]["assertionResults"][0]["failureMessages"] = [
+            "AssertionError: expected 3 to equal 4\n"
+            " at tests/math.test.ts:7:5"
+        ]
+        payload["testResults"][0]["assertionResults"].append(
+            {
+                "duration": 0,
+                "title": "skips network test",
+                "fullName": "integration > skips network test",
+                "ancestorTitles": ["integration"],
+                "status": "skipped",
+                "meta": {},
+            }
+        )
+
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(payload, exit_code=1)
+        )
+
+        assert status == ExecutionStatus.FAILED
+        assert total == 3
+        assert passed == 2
+        assert failed == 1
+        assert len(failures) == 1
+
+        f1 = failures[0]
+        assert f1.framework == "vitest"
+        assert f1.test_name == "math > adds 1 + 2 to equal 3"
+        assert f1.file_path == "/ws/tests/math.test.ts"
+        assert f1.line_number == 7
+        assert f1.failure_type == FailureCategory.ASSERTION_FAILURE
+        assert "expected 3 to equal 4" in f1.message
+
+    def test_parse_embedded_json(self):
+        """Parse JSON embedded in surrounding runner output."""
+        payload = (
+            "RUN  v1.0.0 /ws\n"
+            + "\n"
+            + __import__("json").dumps(self._passing())
+            + "\n"
+        )
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(payload)
+        )
+        assert status == ExecutionStatus.PASSED
+        assert total == 2
+        assert passed == 2
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5d. JEST JSON PARSER TESTS
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestJestJsonParser:
+    """Test the Jest JSON reporter parser."""
+
+    def setup_method(self):
+        self.parser = JestJsonParser()
+
+    def _result(self, payload, exit_code=0):
+        stdout = payload if isinstance(payload, str) else __import__("json").dumps(payload)
+        return ProcessExecutionResult(
+            step_id="STEP-001",
+            command="npx jest --json",
+            category=CommandCategory.TEST,
+            status=ExecutionStatus.FAILED if exit_code else ExecutionStatus.PASSED,
+            exit_code=exit_code,
+            stdout=stdout,
+        )
+
+    def _failing(self):
+        return {
+            "numTotalTestSuites": 2,
+            "numPassedTestSuites": 1,
+            "numFailedTestSuites": 1,
+            "numTotalTests": 3,
+            "numPassedTests": 2,
+            "numFailedTests": 1,
+            "numPendingTests": 0,
+            "success": False,
+            "testResults": [
+                {
+                    "name": "/ws/tests/math.test.js",
+                    "startTime": 100,
+                    "endTime": 200,
+                    "status": "passed",
+                    "message": "",
+                    "perfStats": {"runtime": 100, "slow": False},
+                    "assertionResults": [
+                        {
+                            "ancestorTitles": ["math"],
+                            "duration": 10,
+                            "failureMessages": [],
+                            "fullName": "math adds 1 + 2 to equal 3",
+                            "status": "passed",
+                            "title": "adds 1 + 2 to equal 3",
+                        }
+                    ],
+                },
+                {
+                    "name": "/ws/tests/string.test.js",
+                    "startTime": 100,
+                    "endTime": 200,
+                    "status": "failed",
+                    "message": "",
+                    "perfStats": {"runtime": 100, "slow": False},
+                    "assertionResults": [
+                        {
+                            "ancestorTitles": ["string"],
+                            "duration": 10,
+                            "failureMessages": [
+                                "expect(received).toBe(expected)\n"
+                                "Expected: \"abc\"\n"
+                                "Received: \"abd\"\n"
+                                "  at Object.<anonymous> (tests/string.test.js:14:5)"
+                            ],
+                            "fullName": "string matches abc",
+                            "status": "failed",
+                            "title": "matches abc",
+                        }
+                    ],
+                },
+            ],
+        }
+
+    def test_can_parse_detection(self):
+        """can_parse detects Jest JSON (perfStats) and rejects Vitest JSON."""
+        assert self.parser.can_parse(self._result(self._failing()))
+
+        # Vitest JSON (no perfStats) must NOT be claimed by Jest
+        vitest = self._failing()
+        del vitest["testResults"][0]["perfStats"]
+        del vitest["testResults"][1]["perfStats"]
+        assert not self.parser.can_parse(self._result(vitest))
+
+        assert not self.parser.can_parse(self._result("jest console noise"))
+
+    def test_parse_passing_output(self):
+        """Parse an all-passing Jest report."""
+        payload = self._failing()
+        payload["numFailedTests"] = 0
+        payload["numTotalTests"] = 2
+        payload["testResults"][1]["status"] = "passed"
+        payload["testResults"][1]["assertionResults"][0]["status"] = "passed"
+        payload["testResults"][1]["assertionResults"][0]["failureMessages"] = []
+
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(payload, exit_code=0)
+        )
+
+        assert status == ExecutionStatus.PASSED
+        assert total == 2
+        assert passed == 2
+        assert failed == 0
+        assert len(failures) == 0
+
+    def test_parse_failing_output(self):
+        """Parse a failing Jest report with failure messages."""
+        status, total, passed, failed, skipped, failures = self.parser.parse(
+            self._result(self._failing(), exit_code=1)
+        )
+
+        assert status == ExecutionStatus.FAILED
+        assert total == 3
+        assert passed == 2
+        assert failed == 1
+        assert skipped == 0
+        assert len(failures) == 1
+
+        f1 = failures[0]
+        assert f1.framework == "jest"
+        assert f1.test_name == "string matches abc"
+        assert f1.file_path == "/ws/tests/string.test.js"
+        assert f1.line_number == 14
+        assert "Expected" in f1.message
+        assert f1.stack_trace and "at Object.<anonymous>" in f1.stack_trace
+
+    def test_default_service_registers_all_parsers(self):
+        """Default TestingService parser chain includes the new parsers."""
+        service = TestingService()
+        parser_types = [type(p).__name__ for p in service._parsers]
+        assert parser_types == [
+            "PytestResultParser",
+            "UnittestXMLParser",
+            "VitestJsonParser",
+            "JestJsonParser",
+            "GenericResultParser",
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════
