@@ -486,13 +486,45 @@ class StuckDetector:
 
 
 class ScopeController:
-    """Enforces explicit task scope on changed files."""
+    """Enforces explicit task scope on changed files.
+
+    Phase 16: module/area scope (allowed_modules, expected_change_area,
+    forbidden_areas).
+
+    Phase 20A4: repository-aware scope enforcement. When a
+    :class:`RepositoryScopeRegistry` is bound, every changed file is checked
+    against the repository it claims to belong to — a patch validated against
+    repository A's checkout can never touch repository B. This is the
+    deterministic gate that closes cross-repository execution: planning may
+    cross repositories, execution may not.
+    """
+
+    def __init__(self) -> None:
+        self._registry: Optional[Any] = None
+
+    def set_repository_scopes(self, registry: Any) -> None:
+        """Bind a RepositoryScopeRegistry (Phase 20A4).
+
+        Accepts the lazy protocol: passing ``None`` re-clears the registry,
+        restoring single-repo behaviour.
+        """
+        self._registry = registry
+
+    def clear_repository_scopes(self) -> None:
+        self._registry = None
+
+    @property
+    def repository_scopes(self) -> Optional[Any]:
+        return self._registry
 
     def check(self, state: AutonomousRunState, evidence: IterationEvidence) -> Optional[str]:
         """Return a scope-violation reason, or None if in scope."""
         scope = state.scope
         if not scope.allowed_modules and not scope.expected_change_area:
-            return None  # no scope constraints — nothing to enforce
+            # No module/area constraints, but Phase 20A4 repository isolation
+            # may still apply when a registry is bound.
+            repo_reason = self._check_repository_scope(state, evidence)
+            return repo_reason
 
         violations: List[str] = []
         for f in evidence.changed_files:
@@ -503,11 +535,35 @@ class ScopeController:
             if not in_allowed or not in_expected:
                 violations.append(f"out_of_scope:{f}")
 
+        repo_reason = self._check_repository_scope(state, evidence)
+        if repo_reason:
+            violations.append(f"repository_scope:{repo_reason}")
+
         if violations:
             scope.scope_expansion_requests += 1
             scope.violations = violations[:10]
             if not state.policy.allow_scope_expansion:
                 return f"Scope violation on changed file(s): {', '.join(violations[:3])}"
+        return None
+
+    def _check_repository_scope(
+        self, state: AutonomousRunState, evidence: IterationEvidence
+    ) -> Optional[str]:
+        """Phase 20A4: validate each repository's changed files stay isolated.
+
+        Uses the run's per-repository patch results (populated by the
+        orchestrator's validation stage). A result whose
+        ``rejected_paths`` are non-empty or whose validation_status is
+        ``rejected`` is a repository scope violation.
+        """
+        if self._registry is None:
+            return None
+        for result in evidence.repository_validation:
+            if result.validation_status == "rejected" and result.rejected_paths:
+                return (
+                    f"Repository '{result.repository_id}' patch rejected: "
+                    f"cross-checkout paths {result.rejected_paths[:3]}"
+                )
         return None
 
 
@@ -1542,6 +1598,9 @@ class AutonomousExecutionController:
             plan_summary=(plan.summary or "") if plan else "",
             plan_objective=(plan.objective or "") if plan else "",
             plan_step_count=len(plan.steps or []) if plan else 0,
+            # Phase 20A4: per-repository validation outcomes feed the
+            # ScopeController's repository-isolation gate.
+            repository_validation=getattr(run, "repo_patches", None) or [],
         )
 
     # ── Replanning (§12) ─────────────────────────────────────────

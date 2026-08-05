@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 4, 2026 (session 29 — Phase 20 slice A3: cross-repo planning context)
-> **Current Phase**: Phase 20 (slices A1+A2+A3 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29); next slice A4 — per-repo scope enforcement). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1619 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **17 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`).
+> **Last updated**: August 5, 2026 (session 31 — Phase 20 slice A4: per-repo scope enforcement)
+> **Current Phase**: Phase 20 (slices A1+A2+A3+A4 DONE: `RunSource.repositories` + orchestrator materialization through `OrganizationKnowledgeGraphService.acquire_and_link_repositories` (A1+A2, commit `0954604`), planner org-scope context for multi-repo runs (A3, Session 29, commit `895dad5`), per-repo scope enforcement (A4, Session 31 — `RepositoryScopeRegistry` + `SafePatchEngine` ownership gate + DET-020 + orchestrator per-repo validation/application + API/CLI `repo_patches`; next slice A5 — per-repo EKG ingestion). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
+> **Total tests**: **1640 passed / 18 skipped / 1 failed** on the full deterministic live-PG suite (`-m "not live"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **38 new tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`). `scripts/demo_phase20.py` demos A–F ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2053,4 +2053,90 @@ orchestration 82 passed.
 **Next:** slice A4 — per-repo scope enforcement (extend `ScopeController` +
 `deterministic_review._check_file_scope` so a patch is validated against its own
 repo's checkout, never cross-checkout). A5 (per-repo EKG ingestion) pairs with it.
+
+### Session 31 (August 5, 2026) — Phase 20 slice A4: Per-Repo Scope Enforcement 🚀
+
+Fourth slice of Phase 20: make repository isolation **deterministic and
+enforced at every gate**. Before A4 a per-repo patch was declared alongside a
+run but nothing stopped it being validated/applied against the wrong checkout.
+A4 closes that: every repository has a scope, every patch is bound to one
+repository, and the orchestrator validates + applies each patch against ITS OWN
+checkout only.
+
+**New model + engine layer:**
+
+- `app/services/repository_scope.py` (new): `RepositoryScope` (repository_id,
+  namespace, checkout_root, owned_paths, workspace_path) +
+  `RepositoryScopeRegistry` — `register`/`resolve`/`check_path` (path
+  containment, no `..` escape) /`validate_patch` (cross-repository claim +
+  out-of-checkout rejection) /`to_dicts`/`from_dicts` (serialization).
+- `app/models/coding.py` `PatchSet` gained `repository_id`/
+  `repository_namespace`/`workspace_path`/`originating_run_id` (provenance).
+- `app/models/orchestration.py`: `RepositoryPatchInput` (input spec: repository_id,
+  namespace, workspace_path, patch) + `RepositoryPatchResult` (per-repo
+  validation/application outcome with `summary()`, incl. `originating_plan_id`);
+  `RunSource.repo_patches` + `DevPilotRun.repo_patches` + `DevPilotRunResult.repo_validation`;
+  events `REPOSITORY_SCOPE_VIOLATION`/`REPOSITORY_PATCH_VALIDATED`/
+  `REPOSITORY_PATCH_REJECTED`.
+- `app/models/review.py`: `ReviewInput.extra_context` now carries
+  `primary_repository_id`/`repository_patch_results`/`repository_scopes`.
+
+**SafePatchEngine ownership gate:**
+
+- `check_repository_ownership(patch)` — a patch bound to repository A is never
+  validated/applied against repository B's checkout (cross-repository) nor may
+  any path escape the owning checkout. Backwards compatible: unattributed
+  patches behave as before. Wired into `dry_run`/`apply`.
+
+**DeterministicReview DET-020 (CRITICAL, blocking):**
+
+- `_check_repository_scope` produces a blocking `DET-020` finding when a
+  pre-computed per-repo result is rejected, the primary patch escapes, or any
+  changed path lands outside its owning repository scope.
+
+**ScopeController (autonomy):**
+
+- `set_repository_scopes`/`clear_repository_scopes`/per-repo evidence —
+  rejected per-repo results surface as repository scope violations on
+  autonomous runs; clean results stay clean.
+
+**OrchestrationService wiring:**
+
+- `_primary_repository_id` (stable `repo-<dir>` id),
+  `_build_repository_scopes` (per-run cached registry from primary + aux
+  namespaces + pending inputs), `_repository_scope_for`.
+- `_stage_patch_validation` validates the primary patch vs the primary checkout
+  AND each `repo_patches` input against its own checkout
+  (`_validate_single_repo_patch`: hash enrichment vs own checkout, ownership
+  gate, content validation); any rejection fails the stage (blocking isolation).
+- `_stage_patch_application` applies each validated per-repo patch with an
+  engine bound to that repo's checkout (`_apply_single_repo_patch`), mirrors the
+  primary outcome onto its repo result.
+- `execute_run` application gate fixed: it now looks for PENDING work (unapplied
+  primary + validated-but-unapplied per-repo results) instead of
+  `not run.repo_patches` — the old gate short-circuited application for every
+  multi-repo run once validation populated results.
+- Review/quality-gate `extra_context` gains `_repository_review_context(run)`;
+  `_build_result` aggregates `repo_validation`; autonomy evidence populates
+  `repository_validation`.
+
+**API/CLI surface:**
+
+- `POST /api/v1/runs` accepts `repo_patches` (malformed → HTTP 400) and returns
+  `repo_validation` summaries; workflow `run_user_task`/`run_github_issue` pass
+  them through; CLI `run --repo-patch ID=WORKSPACE=PATCH_JSON` +
+  per-repo result display.
+
+**Validation:** full deterministic suite `-m "not live"` → **1640 passed / 18
+skipped / 1 failed** (+21 new A4 tests in `tests/test_phase20_repo_scope.py`,
+zero regressions; the 1 failure remains the pre-existing
+`test_wrapper_skips_cleanly_without_provider` env quirk). A4 suite 21/21,
+phase20 suite 31 passed, orchestration 82 passed. `scripts/demo_phase20.py`
+demos A–F ALL PASS (multi-repo surface, aux materialization, org planning
+context, per-repo validation, cross-checkout rejection, end-to-end execute_run
+with `repo_validation` aggregated).
+
+**Next:** slice A5 — per-repo EKG ingestion (`record_run` already stamps
+`repository_id`; ensure cross-repo runs ingest their patches into each repo's
+namespace and link the run across namespaces via the org graph).
 

@@ -17,7 +17,11 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from app.models.orchestration import RepositorySpec, RunSourceType
+from app.models.orchestration import (
+    RepositoryPatchInput,
+    RepositorySpec,
+    RunSourceType,
+)
 from app.workflows.orchestration import OrchestrationWorkflow
 
 router = APIRouter(prefix="/api/v1", tags=["orchestration"])
@@ -54,6 +58,23 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                     detail=f"invalid repositories spec: {exc}",
                 ) from exc
 
+        # Phase 20A4: optional per-repository patch inputs, each validated +
+        # applied against its OWN checkout only (repository isolation).
+        repo_patches = None
+        raw_patches = body.get("repo_patches")
+        if raw_patches:
+            if not isinstance(raw_patches, list):
+                raise HTTPException(status_code=400, detail="repo_patches must be a list")
+            try:
+                repo_patches = [
+                    RepositoryPatchInput.model_validate(r) for r in raw_patches
+                ]
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid repo_patches spec: {exc}",
+                ) from exc
+
         if source_type == "github_issue":
             issue_number = body.get("issue_number")
             if not issue_number:
@@ -64,6 +85,7 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 title=title,
                 description=description,
                 repositories=repositories,
+                repo_patches=repo_patches,
             )
         else:
             result = await workflow.run_user_task(
@@ -72,6 +94,7 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 repository_path=repository or None,
                 workspace_root=body.get("workspace_root"),
                 repositories=repositories,
+                repo_patches=repo_patches,
             )
 
         return {"success": True, "data": _sanitize_result(result)}
@@ -276,8 +299,11 @@ def _sanitize_result(result: Any) -> Dict[str, Any]:
             "title": result.source.title[:200],
         },
         "repository": result.repository,
+        "auxiliary_repositories": result.auxiliary_repositories,
         "stages": result.stages,
         "events": result.events[:50],
+        # Phase 20A4: per-repository validation/application outcomes.
+        "repo_validation": [r.summary() for r in result.repo_validation],
         "failure": {
             "stage": result.failure.stage.value,
             "code": result.failure.code.value,

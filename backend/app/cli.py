@@ -148,6 +148,14 @@ def main() -> None:
         help="Auxiliary repository (Phase 20) as repository_id=local_path; "
              "repeatable. Materialized + linked via the org graph.",
     )
+    run_parser.add_argument(
+        "--repo-patch", type=str, action="append", default=[],
+        metavar="ID=WORKSPACE=PATCH_JSON",
+        help="Per-repository patch (Phase 20A4) as "
+             "repository_id=workspace_path=patch_json_file; repeatable. The "
+             "patch is validated + applied against that repository's OWN "
+             "checkout only (repository isolation).",
+    )
 
     # ── Phase 11H: Verification commands ──────────────────────────
     vp_parser = subparsers.add_parser(
@@ -222,7 +230,7 @@ def main() -> None:
     elif args.command == "verify":
         asyncio.run(run_verify())
     elif args.command == "run":
-        asyncio.run(run_orchestration(repo=args.repo, task=args.task, description=args.description, json_output=args.json, aux_repo=args.aux_repo))
+        asyncio.run(run_orchestration(repo=args.repo, task=args.task, description=args.description, json_output=args.json, aux_repo=args.aux_repo, repo_patch=args.repo_patch))
     elif args.command == "code-index":
         from app.cli_code_intelligence import run_code_index
         run_code_index(args.path, args.verbose)
@@ -849,14 +857,23 @@ async def run_verify() -> None:
         sys.exit(1)
 
 
-async def run_orchestration(repo: str, task: str, description: str = "", json_output: bool = False, aux_repo=None) -> None:
+async def run_orchestration(repo: str, task: str, description: str = "", json_output: bool = False, aux_repo=None, repo_patch=None) -> None:
     """Execute end-to-end DevPilot pipeline (Phase 10).
 
     ``aux_repo`` accepts ``repository_id=local_path`` entries that become
     auxiliary repositories materialized + linked via the org graph (Phase 20).
+    ``repo_patch`` accepts ``repository_id=workspace_path=patch_json_file``
+    entries that seed per-repository patches validated + applied against each
+    repository's OWN checkout only (Phase 20A4).
     """
     from app.services.orchestration_service import OrchestrationService
-    from app.models.orchestration import RepositorySpec, RunSource, RunSourceType
+    from app.models.orchestration import (
+        RepositoryPatchInput,
+        RepositorySpec,
+        RunSource,
+        RunSourceType,
+    )
+    from app.models.coding import PatchSet
 
     print(f"\n{'='*60}\n  DevPilot Run (Phase 10)\n{'='*60}")
     print(f"  Repository: {repo}")
@@ -872,6 +889,28 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
         repositories = repositories or []
         repositories.append(RepositorySpec(repository_id=aux_id, path=aux_path))
 
+    repo_patches = None
+    for entry in (repo_patch or []):
+        parts = entry.split("=")
+        if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
+            raise SystemExit(
+                f"--repo-patch must be repository_id=workspace_path=patch_json_file, got: {entry!r}"
+            )
+        repo_id, ws_path, patch_json = parts
+        import json
+        try:
+            with open(patch_json, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"--repo-patch JSON load failed for {patch_json!r}: {exc}")
+        patch = PatchSet.model_validate(raw)
+        repo_patches = repo_patches or []
+        repo_patches.append(RepositoryPatchInput(
+            repository_id=repo_id,
+            workspace_path=ws_path,
+            patch=patch,
+        ))
+
     is_github = repo.startswith("https://github.com/") or repo.startswith("github.com/")
     source = RunSource(
         source_type=RunSourceType.GITHUB_ISSUE if is_github else RunSourceType.USER_TASK,
@@ -879,6 +918,7 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
         description=description,
         repository_path=repo,
         repositories=repositories,
+        repo_patches=repo_patches,
     )
 
     orch = OrchestrationService()
@@ -920,6 +960,19 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
         print(f"  Verification: {g.verification_status}")
     if result.failure:
         print(f"\n  Failure: [{result.failure.code.value}] {result.failure.message[:200]}")
+
+    # Phase 20A4: per-repository validation/application outcomes.
+    if result.repo_validation:
+        print(f"\n  {'='*56}\n  Per-Repository Patches (Phase 20A4)\n  {'='*56}")
+        for rv in result.repo_validation:
+            icon = "✓" if rv.validation_status == "validated" else "✗"
+            print(
+                f"  {icon} {rv.repository_id:<24} validate={rv.validation_status:<10} "
+                f"apply={rv.application_status:<10} changes={rv.changes_applied}/{rv.changes_attempted}"
+            )
+            for err in rv.validation_errors[:3]:
+                print(f"      - {err}")
+
     if result.duration_seconds:
         print(f"\n  Duration: {result.duration_seconds:.2f}s")
     print(f"\n{'='*60}\n")

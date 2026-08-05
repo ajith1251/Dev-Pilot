@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.base import new_id
 from app.models.collaboration import EvidenceRef
+from app.models.orchestration import RepositoryPatchResult
 
 
 def _utcnow_iso() -> str:
@@ -597,6 +598,16 @@ class IterationEvidence(BaseModel):
     plan_summary: str = Field(default="", max_length=SUMMARY_MAX_LEN)
     plan_objective: str = Field(default="", max_length=SUMMARY_MAX_LEN)
     plan_step_count: int = Field(default=0)
+
+    # Phase 20A4 — per-repository patch validation outcomes aggregated from
+    # the orchestrator's validation stage. Each entry is one
+    # RepositoryPatchResult. The ScopeController inspects these to detect
+    # cross-repository scope violations without ever cross-checking two
+    # repositories against the same checkout.
+    repository_validation: List[RepositoryPatchResult] = Field(
+        default_factory=list, max_length=20,
+        description="Per-repository validation outcomes (Phase 20A4)",
+    )
 
     def error_fingerprint(self) -> str:
         """Stable fingerprint of the dominant failure (for stuck detection)."""

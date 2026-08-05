@@ -1,7 +1,7 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: IN PROGRESS — slices A1–A3 DONE (Sessions 28–29), A4 next
-> **Date**: August 4, 2026
+> **Status**: IN PROGRESS — slices A1–A4 DONE (Sessions 28–31), A5 next
+> **Date**: August 5, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
 > knowledge layer (EKG + organization graph) is now **cross-repository**, but the
 > execution layer (`OrchestrationService`) was bound to **one repository per
@@ -68,6 +68,20 @@ Close the execution gap on top of the org graph.
   (`autonomy_service.ScopeController`) + `deterministic_review._check_file_scope`
   to track which changed path belongs to which repository; a patch is validated
   against its own repo's checkout (`SafePatchEngine`), never cross-checkout.
+  **✅ DONE (Session 31):** `RepositoryScopeRegistry` (new
+  `app/services/repository_scope.py`) + `PatchSet.repository_id` provenance +
+  `RepositoryPatchInput`/`RepositoryPatchResult`; `SafePatchEngine`
+  `check_repository_ownership` gate wired into `dry_run`/`apply`;
+  `DeterministicReview` DET-020 (blocking) + `ScopeController` repository
+  scopes; orchestrator validates + applies each repo's patch against ITS OWN
+  checkout (`_stage_patch_validation`/`_stage_patch_application`,
+  `_validate_single_repo_patch`/`_apply_single_repo_patch`), review
+  `extra_context` carries `repository_patch_results`/`repository_scopes`,
+  `_build_result` aggregates `repo_validation`, autonomy evidence populates
+  `repository_validation`; API `POST /api/v1/runs` `repo_patches` (400 on
+  malformed) + CLI `--repo-patch ID=WORKSPACE=PATCH_JSON`. 21 new tests
+  (`tests/test_phase20_repo_scope.py`); `scripts/demo_phase20.py` demos A–F ALL
+  PASS; full suite 1640 passed / 18 skipped / 1 pre-existing env failure.
 - **A5. Per-repo EKG ingestion** — `record_run` already stamps `repository_id`;
   ensure cross-repo runs ingest their patches into each repo's namespace and link
   the run across namespaces via the org graph.
@@ -108,7 +122,7 @@ Close the execution gap on top of the org graph.
 |---|---|---|
 | 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked — **✅ DONE (Session 28)** |
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, A5 next |
-| 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts |
+| 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
 | 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — API/CLI already accept `repositories` (done with A1/A2); remaining: dashboard run form |
 | 5 | B/D/E | hardening + polish (B1 needs a user infra decision) |
 
@@ -132,7 +146,8 @@ Close the execution gap on top of the org graph.
   per-repo EKG namespace ingestion, API/CLI contract.
   **✅ A1+A2 covered (10 tests in `tests/test_phase20_multi_repo_run.py`);**
   **✅ A3 covered (7 tests: 3 in `test_organization_graph.py` +
-  4 in `test_phase20_multi_repo_run.py`).**
-- Full deterministic suite stays green (**1619 passed / 18 skipped / 1 pre-existing
+  4 in `test_phase20_multi_repo_run.py`);**
+  **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`).**
+- Full deterministic suite stays green (**1640 passed / 18 skipped / 1 pre-existing
   env failure**).
-- `scripts/demo_phase20.py` demos A–E (deterministic, no paid LLM).
+- `scripts/demo_phase20.py` demos A–F ALL PASS (deterministic, no paid LLM).

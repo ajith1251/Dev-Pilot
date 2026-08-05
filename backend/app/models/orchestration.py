@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.models.coding import PatchApplicationResult, PatchSet
+from app.models.coding import PatchApplicationResult, PatchSet, PatchStatus
 from app.models.issues import ImplementationPlan, StructuredRequirements
 from app.models.profile import RepositoryProfile
 from app.models.rag import RetrievedContext
@@ -138,6 +138,11 @@ class EventType(str, Enum):
     # Phase 20 — multi-repository acquisition events
     AUXILIARY_REPOSITORIES_ACQUIRED = "auxiliary_repositories_acquired"
 
+    # Phase 20A4 — per-repository scope enforcement
+    REPOSITORY_SCOPE_VIOLATION = "repository_scope_violation"
+    REPOSITORY_PATCH_VALIDATED = "repository_patch_validated"
+    REPOSITORY_PATCH_REJECTED = "repository_patch_rejected"
+
 
 class FailureCode(str, Enum):
     """Machine-readable failure codes."""
@@ -237,6 +242,85 @@ TERMINAL_STAGES: set[StageType] = {
 # ── Domain Models ───────────────────────────────────────────────
 
 
+# ── Phase 20A4: per-repository patch isolation ─────────────────────
+
+
+class RepositoryPatchInput(BaseModel):
+    """A patch bound to a specific repository for per-repo validation.
+
+    Used by deterministic test/demo paths and (optionally) by the run API to
+    submit patches for auxiliary repositories that are validated and applied
+    against their own checkout only.
+    """
+
+    repository_id: str = Field(description="Owning repository namespace")
+    repository_namespace: str = Field(default="", description="Repository namespace")
+    workspace_path: str = Field(description="Checkout root this patch targets")
+    patch: PatchSet = Field(description="Patch bound to this repository")
+
+    def summarize(self) -> Dict[str, Any]:
+        return {
+            "repository_id": self.repository_id[:64],
+            "repository_namespace": self.repository_namespace[:64],
+            "workspace_path": self.workspace_path[:200],
+            "patch_id": self.patch.patch_id[:64],
+            "changes": len(self.patch.changes),
+        }
+
+
+class RepositoryPatchResult(BaseModel):
+    """Per-repository validation + application outcome (Phase 20A4).
+
+    Each entry records how a single repository's patch was handled so the
+    unified run result can report per-repo validation status, rejected paths,
+    and deterministic findings without ever conflating two repositories.
+    """
+
+    repository_id: str = Field(description="Owning repository namespace")
+    repository_namespace: str = Field(default="", description="Repository namespace")
+    workspace_path: str = Field(description="Checkout root the patch was validated against")
+    patch_id: str = Field(default="", description="Patch identifier")
+    originating_run_id: Optional[str] = Field(default=None, description="Run that produced the patch")
+    originating_plan_id: Optional[str] = Field(default=None, description="Plan the patch implements")
+    validation_status: str = Field(
+        default="not_attempted",
+        description="validated | rejected | not_attempted",
+    )
+    validation_errors: List[str] = Field(default_factory=list)
+    application_status: str = Field(
+        default="not_attempted",
+        description="applied | rejected | rolled_back | not_attempted",
+    )
+    application_errors: List[str] = Field(default_factory=list)
+    rejected_paths: List[str] = Field(default_factory=list)
+    deterministic_findings: List[str] = Field(default_factory=list)
+    changes_applied: int = Field(default=0, description="Number of changes successfully applied")
+    changes_attempted: int = Field(default=0, description="Number of changes in the patch")
+    status: str = Field(
+        default="ok",
+        description="ok | rejected | applied | pending",
+    )
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "repository_id": self.repository_id[:64],
+            "repository_namespace": self.repository_namespace[:64],
+            "workspace_path": self.workspace_path[:200],
+            "patch_id": self.patch_id[:64],
+            "originating_run_id": self.originating_run_id,
+            "originating_plan_id": self.originating_plan_id,
+            "validation_status": self.validation_status,
+            "validation_errors": self.validation_errors[:10],
+            "application_status": self.application_status,
+            "application_errors": self.application_errors[:10],
+            "rejected_paths": self.rejected_paths[:20],
+            "deterministic_findings": self.deterministic_findings[:20],
+            "changes_applied": self.changes_applied,
+            "changes_attempted": self.changes_attempted,
+            "status": self.status,
+        }
+
+
 class RepositorySpec(BaseModel):
     """Specification for an auxiliary repository in a Phase 20 run.
 
@@ -300,6 +384,16 @@ class RunSource(BaseModel):
     )
     issue_number: Optional[int] = Field(default=None, description="GitHub issue number")
     issue_url: Optional[str] = Field(default=None, description="GitHub issue URL")
+    # Phase 20A4: deterministic per-repository patch inputs. Each entry is
+    # validated + applied against its OWN checkout only (repository
+    # isolation). The primary patch is produced by the coding stage against
+    # `repository_path`; these are auxiliary-repository patches seeded by the
+    # caller for deterministic multi-repo runs.
+    repo_patches: Optional[List[RepositoryPatchInput]] = Field(
+        default=None,
+        description="Per-repository patches to validate/apply against each "
+                    "repository's own checkout (Phase 20A4)",
+    )
 
 
 class StageResult(BaseModel):
@@ -367,6 +461,16 @@ class DevPilotRun(BaseModel):
     review_report: Optional[ReviewReport] = Field(default=None)
     quality_gate_result: Optional[QualityGateResult] = Field(default=None)
 
+    # Phase 20A4 — per-repository patch validation/application outcomes.
+    # The primary patch (above) is validated against `repository_path`; each
+    # entry here records how an auxiliary-repository patch was handled
+    # against its OWN checkout. A run is isolated only when every entry's
+    # changed paths stayed within its own checkout.
+    repo_patches: List[RepositoryPatchResult] = Field(
+        default_factory=list,
+        description="Per-repository validation/application results (Phase 20A4)",
+    )
+
     # Orchestration internals
     stage_results: List[StageResult] = Field(default_factory=list)
     events: List[RunEvent] = Field(default_factory=list)
@@ -392,6 +496,14 @@ class DevPilotRunResult(BaseModel):
     auxiliary_repositories: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Materialized auxiliary repository namespaces (Phase 20)",
+    )
+    # Phase 20A4 — per-repository validation/application summaries, one entry
+    # per participating repository (primary + auxiliary). Exposed on the API
+    # result so consumers can see which repositories validated cleanly and
+    # which were rejected for scope violations.
+    repo_validation: List[RepositoryPatchResult] = Field(
+        default_factory=list,
+        description="Per-repository validation results (Phase 20A4)",
     )
 
     # Stage summary

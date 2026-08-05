@@ -11,12 +11,14 @@ Deterministic file mutation engine with:
 - No shell execution, no repository code execution
 """
 
+from __future__ import annotations
+
 import difflib
 import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from app.core.exceptions import (
     PatchApplicationError,
@@ -32,6 +34,9 @@ from app.models.coding import (
 )
 from app.services.patch_validator import PatchValidator
 
+if TYPE_CHECKING:
+    from app.services.repository_scope import RepositoryScope, RepositoryScopeRegistry
+
 
 class SafePatchEngine:
     """Deterministic safe patch engine for Phase 6.
@@ -39,6 +44,12 @@ class SafePatchEngine:
     Applies validated FileChange operations to a writable workspace.
     Supports dry-run, diff generation, rollback, and atomic writes.
     Never executes repository code or shell commands.
+
+    Phase 20A4 — repository ownership: when ``repository_id`` and/or a
+    ``RepositoryScopeRegistry`` are provided, the engine refuses any patch
+    whose declared owner is a different repository, and refuses any change
+    whose resolved target escapes this repository's checkout. Cross-checkout
+    application is therefore impossible by construction.
     """
 
     def __init__(
@@ -46,17 +57,84 @@ class SafePatchEngine:
         workspace_root: str,
         validator: Optional[PatchValidator] = None,
         max_file_size: int = 500_000,
+        repository_id: Optional[str] = None,
+        repository_scope: Optional["RepositoryScope"] = None,
+        scope_registry: Optional["RepositoryScopeRegistry"] = None,
     ):
         self._workspace_root = Path(workspace_root).resolve()
         self._validator = validator or PatchValidator(
             workspace_root=str(self._workspace_root)
         )
         self._max_file_size = max_file_size
+        # Phase 20A4: repository binding. A patch validated by this engine is
+        # owned by ``repository_id`` and must resolve against
+        # ``repository_scope``'s checkout root. ``scope_registry`` enables
+        # ownership cross-checks for multi-repository runs.
+        self._repository_id = repository_id
+        self._repository_scope = repository_scope
+        self._scope_registry = scope_registry
 
     # ── Public API ──────────────────────────────────────────────────────────
 
+    def _ownership_errors(self, patch_set: PatchSet) -> List[str]:
+        """Phase 20A4: reject patches bound to another repository.
+
+        Returns a list of ownership violation messages (empty = OK). A patch
+        whose ``repository_id`` is set but does not match this engine's
+        ``repository_id`` is rejected outright — the engine never validates a
+        patch against a different repository's checkout. When no registry is
+        bound this check is skipped (backwards-compatible primary path).
+        """
+        if self._scope_registry is None and self._repository_id is None:
+            return []
+        declared = patch_set.repository_id
+        if not declared:
+            # Unattributed patch: bind it to this engine's repository (the
+            # primary/repo being patched). Backwards compatible.
+            return []
+        if self._repository_id and declared != self._repository_id:
+            return [
+                f"patch claims repository '{declared}' but SafePatchEngine is "
+                f"bound to repository '{self._repository_id}' — cross-repository "
+                f"patch rejection"
+            ]
+        return []
+
+    def check_repository_ownership(self, patch_set: PatchSet) -> Tuple[bool, List[str]]:
+        """Phase 20A4: validate patch ownership + per-change path containment.
+
+        Returns ``(ok, errors)``. Delegates ownership to
+        :class:`RepositoryScopeRegistry` when one is bound, otherwise falls
+        back to the lightweight in-engine check. Never raises: callers surface
+        the structured result.
+        """
+        errors: List[str] = []
+        errors.extend(self._ownership_errors(patch_set))
+        if self._scope_registry is not None and self._repository_id:
+            try:
+                ok, scope_errors, rejected = self._scope_registry.validate_patch(
+                    self._repository_id, patch_set
+                )
+                if not ok:
+                    errors.extend(scope_errors)
+            except Exception as exc:  # defensive: never crash validation
+                errors.append(f"scope validation unavailable: {exc}")
+        if errors:
+            return False, errors
+        return True, []
+
     def dry_run(self, patch_set: PatchSet) -> PatchApplicationResult:
         """Validate and simulate a patch without modifying any files."""
+        # Phase 20A4: repository ownership + path containment gate.
+        ok, errors = self.check_repository_ownership(patch_set)
+        if not ok:
+            return self._make_result(
+                patch_set.patch_id,
+                PatchStatus.REJECTED,
+                dry_run=True,
+                errors=errors,
+            )
+
         validation = self._validator.validate_with_workspace(
             patch_set, str(self._workspace_root)
         )
@@ -88,13 +166,23 @@ class SafePatchEngine:
     def apply(self, patch_set: PatchSet) -> PatchApplicationResult:
         """Validate and apply a patch to the workspace.
 
-        1. Validate the patch against actual workspace state
-        2. Snapshot affected files
-        3. Apply each change transactionally
-        4. Rollback entirely on any failure
-        5. Return structured result
+        1. Repository ownership + path containment (Phase 20A4)
+        2. Validate the patch against actual workspace state
+        3. Snapshot affected files
+        4. Apply each change transactionally
+        5. Rollback entirely on any failure
+        6. Return structured result
         """
-        # Step 1: Validate against actual workspace
+        # Step 1: Phase 20A4 repository ownership + path containment.
+        ok, ownership_errors = self.check_repository_ownership(patch_set)
+        if not ok:
+            return self._make_result(
+                patch_set.patch_id,
+                PatchStatus.REJECTED,
+                errors=ownership_errors,
+            )
+
+        # Step 2: Validate against actual workspace
         validation = self._validator.validate_with_workspace(
             patch_set, str(self._workspace_root)
         )

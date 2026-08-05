@@ -403,12 +403,19 @@ class DeterministicReview:
     # ── Check 5: Changed-file Scope ────────────────────────────
 
     def _check_file_scope(self, inp: ReviewInput) -> None:
-        """Detect out-of-scope changes."""
+        """Detect out-of-scope changes (plan scope + Phase 20A4 repo scope)."""
         if not inp.implementation_plan or not inp.original_patch:
             return
 
         plan = inp.implementation_plan
         patch = inp.original_patch
+
+        # Phase 20A4: repository-aware scope enforcement. When a repository
+        # scope registry is present in extra_context, validate that every
+        # change in the primary patch resolves inside the repository it
+        # claims to own — a change targeting another repository's checkout
+        # is a CRITICAL, blocking violation (DET-020).
+        self._check_repository_scope(inp)
 
         # Collect known affected areas from plan
         known_areas: Set[str] = set()
@@ -440,6 +447,92 @@ class DeterministicReview:
                 evidence=[f"Out of scope: {out_of_scope[:10]}",
                           f"Known areas: {list(known_areas)[:10]}"],
             ))
+
+    def _check_repository_scope(self, inp: ReviewInput) -> None:
+        """Phase 20A4: surface cross-repository scope violations (DET-020).
+
+        Two sources of truth, both deterministic:
+
+        1. ``repository_patch_results`` in ``extra_context`` — the
+           orchestrator's per-repo validation already computed
+           ``rejected_paths`` for any patch that escaped its checkout. Each
+           such entry becomes a blocking finding.
+        2. ``repository_scopes`` + the primary ``original_patch`` — the
+           reviewer re-derives path containment from the scope registry
+           itself, so a missing/stale result cannot mask a violation.
+        """
+        registry = self._load_scope_registry(inp)
+        if registry is None:
+            return
+
+        # Source 1: pre-computed per-repo validation results.
+        patch_results = inp.extra_context.get("repository_patch_results", []) or []
+        for res in patch_results:
+            repo_id = res.get("repository_id", "")
+            rejected = res.get("rejected_paths", []) or []
+            vstatus = res.get("validation_status", "")
+            if rejected or vstatus == "rejected":
+                self._findings.append(ReviewFinding(
+                    finding_id="DET-020",
+                    category=FindingCategory.SCOPE,
+                    severity=FindingSeverity.CRITICAL,
+                    title=f"Repository '{repo_id}' patch escaped its checkout",
+                    description=(
+                        f"Patch for repository '{repo_id}' was validated against "
+                        f"its own checkout but {len(rejected)} change(s) resolve "
+                        f"outside that repository's checkout root — cross-repository "
+                        f"patch application rejected."
+                    ),
+                    blocking=True,
+                    confidence=1.0,
+                    evidence=[f"rejected_paths: {rejected[:10]}"],
+                ))
+
+        # Source 2: re-validate the primary patch's paths against its own scope.
+        patch = inp.original_patch
+        if not patch:
+            return
+        repo_id = getattr(patch, "repository_id", None) or inp.extra_context.get("primary_repository_id")
+        if not repo_id:
+            return
+        scope = registry.resolve(repo_id)
+        if scope is None:
+            return
+        escaped: List[str] = []
+        for change in patch.changes:
+            if change.operation == FileOperation.DELETE:
+                continue
+            check = scope.contains_path(change.path)
+            if not check.is_within:
+                escaped.append(change.path)
+        if escaped:
+            self._findings.append(ReviewFinding(
+                finding_id="DET-020",
+                category=FindingCategory.SCOPE,
+                severity=FindingSeverity.CRITICAL,
+                title=f"Primary patch escaped repository '{repo_id}' checkout",
+                description=(
+                    f"{len(escaped)} change(s) {escaped[:5]} resolve outside "
+                    f"repository '{repo_id}' checkout {scope.checkout_root} — "
+                    f"cross-repository path containment violation."
+                ),
+                blocking=True,
+                confidence=1.0,
+                evidence=[f"escaped_paths: {escaped[:10]}"],
+            ))
+
+    def _load_scope_registry(self, inp: ReviewInput) -> Optional[Any]:
+        """Build a RepositoryScopeRegistry from serialized extra_context."""
+        scopes = inp.extra_context.get("repository_scopes")
+        if not scopes:
+            return None
+        try:
+            from app.services.repository_scope import RepositoryScopeRegistry
+
+            return RepositoryScopeRegistry.from_dicts(scopes)
+        except Exception as exc:
+            self._warnings.append(f"repository scope registry unavailable: {exc}")
+            return None
 
     # ── Check 6: Test Tampering ─────────────────────────────────
 

@@ -15,6 +15,7 @@ from app.models.orchestration import (
     DevPilotRun,
     DevPilotRunResult,
     OrchestrationCapabilities,
+    RepositoryPatchInput,
     RepositorySpec,
     RunSource,
     RunSourceType,
@@ -67,11 +68,15 @@ class OrchestrationWorkflow:
         repository_path: Optional[str] = None,
         workspace_root: Optional[str] = None,
         repositories: Optional[List["RepositorySpec"]] = None,
+        repo_patches: Optional[List["RepositoryPatchInput"]] = None,
     ) -> DevPilotRunResult:
         """Run end-to-end pipeline from a user task.
 
         ``repositories`` optionally declares auxiliary repositories to
         materialize + link via the org graph (Phase 20).
+        ``repo_patches`` optionally seeds per-repository patches that are
+        validated + applied against each repository's OWN checkout only
+        (Phase 20A4).
         """
         source = RunSource(
             source_type=RunSourceType.USER_TASK,
@@ -79,6 +84,7 @@ class OrchestrationWorkflow:
             description=description,
             repository_path=repository_path,
             repositories=repositories,
+            repo_patches=repo_patches,
         )
         run = await self._orchestrator.create_run(source)
         logger.info("Created run %s: %s", run.run_id, title[:100])
@@ -94,11 +100,15 @@ class OrchestrationWorkflow:
         title: str = "",
         description: str = "",
         repositories: Optional[List["RepositorySpec"]] = None,
+        repo_patches: Optional[List["RepositoryPatchInput"]] = None,
     ) -> DevPilotRunResult:
         """Run end-to-end pipeline from a GitHub issue.
 
         ``repositories`` optionally declares auxiliary repositories to
         materialize + link via the org graph (Phase 20).
+        ``repo_patches`` optionally seeds per-repository patches that are
+        validated + applied against each repository's OWN checkout only
+        (Phase 20A4).
         """
         source = RunSource(
             source_type=RunSourceType.GITHUB_ISSUE,
@@ -107,6 +117,7 @@ class OrchestrationWorkflow:
             repository_path=repo_url,
             repositories=repositories,
             issue_number=issue_number,
+            repo_patches=repo_patches,
         )
         run = await self._orchestrator.create_run(source)
         logger.info("Created run %s: %s #%d", run.run_id, repo_url, issue_number)

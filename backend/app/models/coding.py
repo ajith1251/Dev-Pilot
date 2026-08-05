@@ -102,6 +102,31 @@ class PatchSet(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     status: PatchStatus = Field(default=PatchStatus.PROPOSED)
 
+    # ── Phase 20A4: repository ownership (patch isolation) ────────
+    # Every patch carries the identity of the repository it targets so the
+    # SafePatchEngine and deterministic reviewer can bind validation to that
+    # repository's own checkout and reject any cross-repository application.
+    # `repository_id` is the org-graph namespace of the owning repository;
+    # `workspace_path` is the resolved checkout root the patch targets;
+    # `originating_run_id` / `originating_plan_id` provide full provenance.
+    repository_id: Optional[str] = Field(
+        default=None,
+        description="Owning repository namespace (Phase 20A4); patch is "
+                    "validated against this repository's checkout only",
+    )
+    repository_namespace: Optional[str] = Field(
+        default=None,
+        description="Repository namespace the patch lives in (Phase 20A4)",
+    )
+    workspace_path: Optional[str] = Field(
+        default=None,
+        description="Checkout root this patch targets (Phase 20A4)",
+    )
+    originating_run_id: Optional[str] = Field(
+        default=None,
+        description="Run that generated this patch (Phase 20A4)",
+    )
+
 
 # ── Patch Validation ────────────────────────────────────────────
 

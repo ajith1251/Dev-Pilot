@@ -43,6 +43,8 @@ from app.models.orchestration import (
     EventType,
     FailureCode,
     OrchestrationCapabilities,
+    RepositoryPatchInput,
+    RepositoryPatchResult,
     RunEvent,
     RunFailure,
     RunSource,
@@ -210,6 +212,13 @@ class OrchestrationService:
         # Shared single instance so materialized auxiliary repositories (A2) are
         # immediately visible to ContextEngine's cross-repo retrieval (A3).
         self._organization_graph: Any = None
+
+        # Phase 20A4 — per-run repository scope registry. Built from the
+        # primary repository + the run's materialized auxiliary namespaces so
+        # every patch is validated against its OWN checkout only. Bound in
+        # execute_run; consumed by the validation/application/review stages.
+        self._repository_scopes: Optional[Any] = None
+        self._repo_scope_run_id: Optional[str] = None
 
     # ── WebSocket Broadcasts ─────────────────────────────────────
 
@@ -456,7 +465,19 @@ class OrchestrationService:
                 return await self._finalize(run, total_start)
 
             # ── STAGE: Patch Application ───────────────────────
-            if not run.patch_result:
+            # Per-repo runs populate run.repo_patches with validation results
+            # during validation, so the "nothing to apply" gate must look for
+            # PENDING work (unapplied primary + validated-but-unapplied
+            # per-repo results), not whether run.repo_patches is non-empty
+            # (Phase 20A4). Otherwise validation would short-circuit
+            # application for every multi-repo run.
+            pending_primary = bool(run.patch_set) and run.patch_result is None
+            pending_repo = any(
+                getattr(r, "validation_status", None) == "validated"
+                and getattr(r, "application_status", None) in (None, "not_attempted")
+                for r in (run.repo_patches or [])
+            )
+            if pending_primary or pending_repo:
                 if not await self._stage_patch_application(run, effective_ws):
                     return await self._finalize(run, total_start)
 
@@ -836,7 +857,196 @@ class OrchestrationService:
         except Exception as exc:
             logger.debug("Memory promotion skipped (non-fatal): %s", exc)
 
-    # ── Stage Implementations ───────────────────────────────────
+        # ── Stage Implementations ───────────────────────────────────
+
+    # ── Phase 20A4: repository scope enforcement ────────────────────
+
+    def _primary_repository_id(self, run: DevPilotRun) -> str:
+        """Stable id for the primary repository (the run's checkout)."""
+        if run.repository_path:
+            return "repo-" + Path(run.repository_path).resolve().name
+        return "primary"
+
+    def _build_repository_scopes(self, run: DevPilotRun) -> Any:
+        """Build the per-run RepositoryScopeRegistry (Phase 20A4).
+
+        Registers:
+        * the primary repository (checkout = run.repository_path);
+        * every materialized auxiliary namespace (repository_id + path);
+        * every pending per-repository patch input (workspace_path).
+
+        The registry is cached per run_id so the validation, application, and
+        review stages all see the same bound set — and so the ScopeController
+        and SafePatchEngine can reject any cross-checkout attempt.
+        """
+        try:
+            from app.services.repository_scope import (
+                RepositoryScope,
+                RepositoryScopeRegistry,
+            )
+        except Exception:
+            return None
+
+        if self._repo_scope_run_id == run.run_id and self._repository_scopes is not None:
+            return self._repository_scopes
+
+        registry = RepositoryScopeRegistry()
+        primary_id = self._primary_repository_id(run)
+
+        def _scope(repo_id: str, namespace: str, checkout: str) -> Optional[RepositoryScope]:
+            checkout = checkout.strip()
+            if not checkout or not Path(checkout).is_dir():
+                return None
+            resolved = str(Path(checkout).resolve())
+            return RepositoryScope(
+                repository_id=repo_id,
+                namespace=namespace or repo_id,
+                checkout_root=resolved,
+                owned_paths=[resolved],
+                workspace_path=resolved,
+            )
+
+        # Primary repository.
+        if run.repository_path:
+            primary = _scope(primary_id, "primary", run.repository_path)
+            if primary is not None:
+                registry.register(primary)
+
+        # Materialized auxiliary namespaces (Phase 20A2).
+        for ns in run.auxiliary_repositories or []:
+            rid = ns.get("repository_id", "")
+            path = ns.get("path", "")
+            if not rid or not path:
+                continue
+            scope = _scope(rid, ns.get("namespace_id", rid), path)
+            if scope is not None:
+                registry.register(scope)
+
+        # Pending per-repository patch inputs (seeded for deterministic
+        # multi-repo runs) — each declares its own checkout.
+        for inp in run.source.repo_patches or []:
+            scope = _scope(inp.repository_id, inp.repository_namespace, inp.workspace_path)
+            if scope is not None:
+                registry.register(scope)
+
+        self._repository_scopes = registry
+        self._repo_scope_run_id = run.run_id
+        return registry
+
+    def _repository_scope_for(self, run: DevPilotRun, repository_id: str) -> Optional[Any]:
+        registry = self._build_repository_scopes(run)
+        if registry is None:
+            return None
+        return registry.resolve(repository_id)
+
+    def _validate_single_repo_patch(
+        self,
+        run: DevPilotRun,
+        repository_id: str,
+        patch: PatchSet,
+        workspace: str,
+        originating_run_id: Optional[str] = None,
+        originating_plan_id: Optional[str] = None,
+    ) -> RepositoryPatchResult:
+        """Validate one repository's patch against its OWN checkout (Phase 20A4).
+
+        The SafePatchEngine is bound to ``repository_id`` + the run's scoped
+        registry so ownership and path containment are enforced by
+        construction. A patch that claims repository A but is handed to
+        repository B's engine is rejected before any file is touched.
+        """
+        registry = self._build_repository_scopes(run)
+
+        # Compute file hashes against THIS checkout so deterministic content
+        # validation can proceed. Files missing in this repo stay hash-less
+        # and are rejected (anti-hallucination).
+        self._enrich_patch_hashes(patch, workspace)
+
+        # Tag the patch with full provenance so ownership is explicit.
+        if patch.repository_id is None:
+            patch.repository_id = repository_id
+        if patch.repository_namespace is None:
+            patch.repository_namespace = repository_id
+        if patch.workspace_path is None:
+            patch.workspace_path = workspace
+        if patch.originating_run_id is None and originating_run_id:
+            patch.originating_run_id = originating_run_id
+        # PatchSet carries its plan reference as ``plan_id``.
+        if patch.plan_id is None and originating_plan_id:
+            patch.plan_id = originating_plan_id
+
+        patch_result = RepositoryPatchResult(
+            repository_id=repository_id,
+            repository_namespace=patch.repository_namespace or repository_id,
+            workspace_path=workspace,
+            patch_id=patch.patch_id,
+            originating_run_id=patch.originating_run_id or originating_run_id,
+            originating_plan_id=patch.plan_id or originating_plan_id,
+            changes_attempted=len(patch.changes),
+        )
+
+        # Phase 20A4: ownership + path-containment gate. This is the
+        # deterministic check that prevents cross-checkout validation — a
+        # patch for repo A is never accepted against repo B's checkout.
+        engine = SafePatchEngine(
+            workspace_root=workspace,
+            repository_id=repository_id,
+            scope_registry=registry,
+        )
+        ok, ownership_errors = engine.check_repository_ownership(patch)
+        if not ok:
+            patch_result.validation_status = "rejected"
+            patch_result.validation_errors = ownership_errors[:10]
+            patch_result.application_status = "not_attempted"
+            patch_result.rejected_paths = [c.path for c in patch.changes]
+            patch_result.status = "rejected"
+            return patch_result
+        patch_result.rejected_paths = []
+
+        # Deterministic content validation against this checkout.
+        validator = self._patch_validator or PatchValidator(workspace_root=workspace)
+        validation = validator.validate_with_workspace(
+            patch, workspace
+        )
+        if not validation.is_valid:
+            patch_result.validation_status = "rejected"
+            patch_result.validation_errors = validation.errors[:10]
+            patch_result.application_status = "not_attempted"
+            patch_result.status = "rejected"
+            return patch_result
+
+        patch_result.validation_status = "validated"
+        patch_result.status = "ok"
+        return patch_result
+
+    def _apply_single_repo_patch(
+        self,
+        run: DevPilotRun,
+        patch: PatchSet,
+        patch_result: RepositoryPatchResult,
+    ) -> RepositoryPatchResult:
+        """Apply one already-validated patch against its OWN checkout.
+
+        Mutates ``patch_result`` in place; the caller owns it. The
+        SafePatchEngine is bound to the patch's ``repository_id`` + the run's
+        scope registry, so a cross-checkout application is rejected by
+        construction even at apply time.
+        """
+        engine = SafePatchEngine(
+            workspace_root=patch_result.workspace_path,
+            repository_id=patch_result.repository_id,
+            scope_registry=self._build_repository_scopes(run),
+        )
+        result = engine.apply(patch)
+        if result.status in (PatchStatus.FAILED, PatchStatus.REJECTED, PatchStatus.ROLLED_BACK):
+            patch_result.application_status = "rejected"
+            patch_result.application_errors = list(result.errors or [])[:10]
+            patch_result.status = "rejected"
+        else:
+            patch_result.application_status = "applied"
+            patch_result.changes_applied = result.changes_applied
+            patch_result.status = "applied"
+        return patch_result
 
     async def _stage_acquisition(self, run: DevPilotRun) -> bool:
         """Clone/acquire the repository."""
@@ -1230,31 +1440,129 @@ class OrchestrationService:
             return False
 
     async def _stage_patch_validation(self, run: DevPilotRun, workspace: str) -> bool:
-        """Validate the generated patch deterministically."""
+        """Validate the generated patch deterministically (primary + per-repo).
+
+        The primary patch (coding-agent output) is validated against the
+        primary checkout as before. Phase 20A4 additionally validates every
+        per-repository patch input against ITS OWN checkout
+        (``RepositoryPatchInput.workspace_path``): ownership + path
+        containment is enforced by ``SafePatchEngine`` bound to each
+        repository's scope, so a patch can never be validated cross-checkout.
+        Any rejected per-repo patch fails the stage (blocking isolation
+        guarantee).
+        """
         await self._transition_to(run, StageType.VALIDATING_PATCH)
         try:
-            if not run.patch_set:
+            has_primary = bool(run.patch_set)
+            has_per_repo = bool(run.source.repo_patches)
+            if not has_primary and not has_per_repo:
                 await self._skip_stage(run, StageType.VALIDATING_PATCH, "No patch to validate")
                 return True
 
-            # An LLM-generated patch cannot know the workspace file hashes —
-            # compute them so deterministic validation can proceed. Files that
-            # do NOT exist in the workspace stay hash-less and are rejected
-            # (preserves the anti-hallucination security check).
-            await self._enrich_patch_hashes(run.patch_set, workspace)
-            self._patch_validator = PatchValidator(workspace_root=workspace)
-            # workspace_root is already set via the constructor — the
-            # validate() signature does not accept it.
-            validation = self._patch_validator.validate(patch=run.patch_set)
-            if not validation.is_valid:
-                await self._fail_stage(run, StageType.VALIDATING_PATCH,
-                                 f"Patch validation: {validation.errors}")
+            repo_results: List[RepositoryPatchResult] = []
+            rejected_repos: List[str] = []
+
+            # ── Primary patch (coding-agent output) vs primary checkout ──
+            if has_primary:
+                # An LLM-generated patch cannot know the workspace file
+                # hashes — compute them so deterministic validation can
+                # proceed. Files that do NOT exist in the workspace stay
+                # hash-less and are rejected (preserves the anti-hallucination
+                # security check).
+                await self._enrich_patch_hashes(run.patch_set, workspace)
+                self._patch_validator = PatchValidator(workspace_root=workspace)
+                # workspace_root is already set via the constructor — the
+                # validate() signature does not accept it.
+                validation = self._patch_validator.validate(patch=run.patch_set)
+                if not validation.is_valid:
+                    await self._fail_stage(run, StageType.VALIDATING_PATCH,
+                                     f"Patch validation: {validation.errors}")
+                    run.failure = RunFailure(
+                        stage=StageType.VALIDATING_PATCH,
+                        code=FailureCode.PATCH_VALIDATION_FAILED,
+                        message=f"Patch rejected: {validation.errors[:3]}",
+                    )
+                    self._add_event(run, EventType.PATCH_REJECTED, str(validation.errors))
+                    return False
+
+                primary_id = self._primary_repository_id(run)
+                primary_result = RepositoryPatchResult(
+                    repository_id=primary_id,
+                    repository_namespace="primary",
+                    workspace_path=workspace,
+                    patch_id=run.patch_set.patch_id,
+                    originating_run_id=run.run_id,
+                    changes_attempted=len(run.patch_set.changes),
+                    validation_status="validated",
+                    status="ok",
+                )
+                # Phase 20A4: the primary patch must stay inside the primary
+                # checkout too — no cross-repository escape, ever.
+                primary_engine = SafePatchEngine(
+                    workspace_root=workspace,
+                    repository_id=primary_id,
+                    scope_registry=self._build_repository_scopes(run),
+                )
+                ok, ownership_errors = primary_engine.check_repository_ownership(run.patch_set)
+                if not ok:
+                    primary_result.validation_status = "rejected"
+                    primary_result.validation_errors = ownership_errors[:10]
+                    primary_result.rejected_paths = [c.path for c in run.patch_set.changes]
+                    primary_result.status = "rejected"
+                    rejected_repos.append(primary_id)
+                repo_results.append(primary_result)
+
+            # ── Per-repository auxiliary patches vs their own checkouts ──
+            for inp in run.source.repo_patches or []:
+                result = self._validate_single_repo_patch(
+                    run,
+                    inp.repository_id,
+                    inp.patch,
+                    inp.workspace_path,
+                    originating_run_id=run.run_id,
+                    originating_plan_id=getattr(run.plan, "plan_id", None) if run.plan else None,
+                )
+                repo_results.append(result)
+                if result.validation_status == "rejected":
+                    rejected_repos.append(result.repository_id)
+
+            run.repo_patches = repo_results
+            await self._store.update(run)
+
+            for result in repo_results:
+                if result.validation_status == "rejected":
+                    self._add_event(
+                        run,
+                        EventType.REPOSITORY_SCOPE_VIOLATION,
+                        f"Repository '{result.repository_id}' patch rejected: "
+                        f"{', '.join(result.validation_errors[:3])}",
+                        metadata={
+                            "repository_id": result.repository_id,
+                            "rejected_paths": result.rejected_paths[:20],
+                        },
+                    )
+                else:
+                    self._add_event(
+                        run,
+                        EventType.REPOSITORY_PATCH_VALIDATED,
+                        f"Repository '{result.repository_id}' patch validated "
+                        f"against its own checkout",
+                        metadata={"repository_id": result.repository_id},
+                    )
+
+            if rejected_repos:
+                await self._fail_stage(
+                    run, StageType.VALIDATING_PATCH,
+                    f"Repository scope violation: {', '.join(rejected_repos[:5])}",
+                )
                 run.failure = RunFailure(
                     stage=StageType.VALIDATING_PATCH,
                     code=FailureCode.PATCH_VALIDATION_FAILED,
-                    message=f"Patch rejected: {validation.errors[:3]}",
+                    message=(
+                        "Per-repository patch rejected: cross-repository or "
+                        f"out-of-checkout paths in {', '.join(rejected_repos[:3])}"
+                    ),
                 )
-                self._add_event(run, EventType.PATCH_REJECTED, str(validation.errors))
                 return False
 
             self._add_event(run, EventType.PATCH_VALIDATED, "Patch passed validation")
@@ -1286,31 +1594,84 @@ class OrchestrationService:
                 pass
 
     async def _stage_patch_application(self, run: DevPilotRun, workspace: str) -> bool:
-        """Apply the validated patch to the workspace."""
+        """Apply the validated patch to the workspace (primary + per-repo)."""
         await self._transition_to(run, StageType.APPLYING_PATCH)
         try:
-            if not run.patch_set:
+            has_primary = bool(run.patch_set)
+            has_per_repo = bool(run.repo_patches)
+            if not has_primary and not has_per_repo:
                 await self._skip_stage(run, StageType.APPLYING_PATCH, "No patch to apply")
                 return True
 
-            self._patch_engine = SafePatchEngine(workspace_root=workspace)
-            result = self._patch_engine.apply(run.patch_set)
-            run.patch_result = result
-
-            if result.status == PatchStatus.FAILED:
-                await self._fail_stage(run, StageType.APPLYING_PATCH, f"Application failed: {result.errors}")
-                run.failure = RunFailure(
-                    stage=StageType.APPLYING_PATCH,
-                    code=FailureCode.PATCH_APPLICATION_FAILED,
-                    message=str(result.errors)[:500],
+            # ── Primary patch (coding-agent output) — bound to primary repo ──
+            if has_primary:
+                self._patch_engine = SafePatchEngine(
+                    workspace_root=workspace,
+                    repository_id=self._primary_repository_id(run),
+                    scope_registry=self._build_repository_scopes(run),
                 )
-                return False
+                result = self._patch_engine.apply(run.patch_set)
+                run.patch_result = result
 
-            self._add_event(
-                run,
-                EventType.PATCH_APPLIED,
-                f"Applied patch: {getattr(result, 'status', 'ok')}",
+                # Mirror the primary outcome onto its repo result.
+                for repo_res in run.repo_patches:
+                    if repo_res.patch_id == run.patch_set.patch_id:
+                        if result.status in (
+                            PatchStatus.FAILED, PatchStatus.REJECTED, PatchStatus.ROLLED_BACK,
+                        ):
+                            repo_res.application_status = "rejected"
+                            repo_res.application_errors = list(result.errors or [])[:10]
+                            repo_res.status = "rejected"
+                        else:
+                            repo_res.application_status = "applied"
+                            repo_res.changes_applied = result.changes_applied
+                            repo_res.status = "applied"
+
+                if result.status == PatchStatus.FAILED:
+                    await self._fail_stage(run, StageType.APPLYING_PATCH, f"Application failed: {result.errors}")
+                    run.failure = RunFailure(
+                        stage=StageType.APPLYING_PATCH,
+                        code=FailureCode.PATCH_APPLICATION_FAILED,
+                        message=str(result.errors)[:500],
+                    )
+                    return False
+
+            # ── Per-repository auxiliary patches vs their own checkouts ──
+            for repo_res in run.repo_patches:
+                if repo_res.validation_status != "validated":
+                    continue
+                inp = next(
+                    (i for i in (run.source.repo_patches or [])
+                     if i.repository_id == repo_res.repository_id),
+                    None,
+                )
+                if inp is None:
+                    continue
+                self._apply_single_repo_patch(run, inp.patch, repo_res)
+                if repo_res.application_status == "rejected":
+                    await self._fail_stage(
+                        run, StageType.APPLYING_PATCH,
+                        f"Repository '{repo_res.repository_id}' patch application "
+                        f"rejected: {', '.join(repo_res.application_errors[:3])}",
+                    )
+                    run.failure = RunFailure(
+                        stage=StageType.APPLYING_PATCH,
+                        code=FailureCode.PATCH_APPLICATION_FAILED,
+                        message=f"Repository '{repo_res.repository_id}' patch application failed",
+                    )
+                    return False
+
+            await self._store.update(run)
+
+            applied_desc = ""
+            if run.patch_result:
+                applied_desc = f": {run.patch_result.status.value}"
+            repo_desc = ", ".join(
+                f"{r.repository_id}={r.application_status}" for r in run.repo_patches
             )
+            if repo_desc:
+                applied_desc += f" | per-repo: {repo_desc}"
+            self._add_event(run, EventType.PATCH_APPLIED, f"Applied patch{applied_desc}")
             await self._complete_stage(run, StageType.APPLYING_PATCH)
             return True
         except Exception as exc:
@@ -1443,6 +1804,10 @@ class OrchestrationService:
                 retrieved_context=run.retrieved_context,
                 changed_files=changed_files,
                 agent_context=agent_context,
+                # Phase 20A4: surface per-repo validation outcomes + the scope
+                # registry to the deterministic reviewer (DET-020 blocking
+                # check re-derives path containment independently).
+                extra_context=self._repository_review_context(run),
             )
             run.review_report = report
             self._add_event(run, EventType.REVIEW_COMPLETED,
@@ -1452,6 +1817,20 @@ class OrchestrationService:
         except Exception as exc:
             await self._fail_stage(run, StageType.REVIEWING, str(exc))
             return False
+
+    def _repository_review_context(self, run: DevPilotRun) -> Dict[str, Any]:
+        """Phase 20A4: serialized repository scope evidence for the reviewer.
+
+        Plain dicts only (evidence-only): per-repo validation results and the
+        serialized scope registry, keyed by ``primary_repository_id``. Both
+        DeterministicReview (DET-020) and the LLM reviewer read from this.
+        """
+        registry = self._build_repository_scopes(run)
+        return {
+            "primary_repository_id": self._primary_repository_id(run),
+            "repository_patch_results": [r.summary() for r in run.repo_patches],
+            "repository_scopes": registry.to_dicts() if registry else [],
+        }
 
     async def _stage_quality_gate(self, run: DevPilotRun) -> bool:
         """Invoke the deterministic Quality Gate."""
@@ -1469,6 +1848,9 @@ class OrchestrationService:
                 repair_result=run.repair_result,
                 test_result=run.test_result,
                 changed_files=[c.path for c in run.patch_set.changes] if run.patch_set else [],
+                # Phase 20A4: per-repo results + scope registry so DET-020 is
+                # enforced deterministically at the quality gate as well.
+                extra_context=self._repository_review_context(run),
             )
             det_result = dr.run(inp)
 
@@ -1640,6 +2022,8 @@ class OrchestrationService:
             source=run.source,
             repository=run.repository_path,
             auxiliary_repositories=run.auxiliary_repositories,
+            # Phase 20A4: per-repository validation/application outcomes.
+            repo_validation=run.repo_patches,
             stages=[
                 {
                     "stage": s.stage.value,

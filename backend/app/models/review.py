@@ -551,6 +551,7 @@ class ReviewCapabilities(BaseModel):
             "requirement_coverage_completeness",
             "unresolved_repair_result",
             "changed_file_scope",
+            "repository_scope_violation",
             "test_deletion_detection",
             "skip_xfail_introduction",
             "protected_security_invariants",
