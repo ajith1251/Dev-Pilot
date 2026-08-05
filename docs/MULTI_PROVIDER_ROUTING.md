@@ -169,13 +169,35 @@ DEVPILOT_LLM_PROVIDER_FALLBACKS=coding:gemini,openai;planning:anthropic,gemini
   global priority. `GET /api/v1/providers/config` and the CLI expose
   `provider_fallbacks` alongside `provider_priority`.
 
-### 2.8 Streaming failover
+### 2.8 Streaming failover + mid-stream token-loss recovery (Phase 20B B3)
 
-`chat_stream` failover happens **before the first token**. If a provider
-errors before yielding any content it is treated like a failed call (classified
-→ retried → failed over). A stream that has already produced tokens is **not**
-abandoned mid-flight — swapping providers mid-stream would corrupt output, so
-the error is surfaced to the caller instead.
+`chat_stream` failover happens **before the first token**: a provider that
+errors without yielding any content is treated like a failed call (classified →
+retried → failed over) and the full prompt is resent to the next provider.
+
+A stream that fails **after** producing tokens is handled as *token loss* rather
+than a plain restart. The caller has already delivered the partial output, so the
+router resends the full prompt with the partial output injected as continuation
+context:
+
+```
+<partial>{already-delivered text}</partial>
+Continue the response from exactly where it left off; do NOT repeat any of the
+partial text — produce only the remaining output.
+```
+
+The next provider in the chain therefore produces **only the remaining text** —
+no duplicated tokens, no lost generation. Each mid-stream hand-off is recorded
+as a `mid_stream_token_loss` failover (with `mid_stream: true`) and a resume
+counter on the source provider; both are visible in `metrics_snapshot()` /
+`provider_snapshots()`.
+
+The hand-off is **bounded** by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX` (default
+`3`, range 0–20) per streaming call: once the budget is spent — or when the last
+provider in the chain is the one that drops and no candidate remains — the
+failure surfaces as `LLMError` (the caller keeps the tokens already received).
+Setting the value to `0` disables mid-stream recovery entirely, restoring
+surfaces-as-error behaviour.
 
 ### 2.9 Failure contract — never silent
 
@@ -209,6 +231,7 @@ All settings live in `app/config.py`:
 | `PROVIDER_RETRY_MAX` | `2` | Max retries per provider attempt |
 | `PROVIDER_RETRY_BASE_BACKOFF_SECONDS` | `0.5` | Exponential backoff base |
 | `PROVIDER_RETRY_MAX_BACKOFF_SECONDS` | `10` | Backoff cap |
+| `PROVIDER_STREAM_RESUME_MAX` | `3` | Max mid-stream prefix-resends per streaming call (0 disables) |
 | `PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures to open |
 | `PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `30` | Open → half-open cooldown |
 | `PROVIDER_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS` | `2` | Half-open probe budget |
@@ -329,6 +352,8 @@ live-Gemini durability tests that require a fresh free-tier quota key.
 - **Typed per-capability fallback lists** (`DEVPILOT_LLM_PROVIDER_FALLBACKS`)
   — **✅ DONE (Phase 20B, Session 34):** each agent stage routes through its
   own provider chain via `LLMConfig.capability`; see §2.7.
+- **Mid-stream token-loss failover (resend prompt with full prefix)**
+  — **✅ DONE (Phase 20B, Session 35):** streams that drop after delivering
+  tokens resume on the next provider with the partial output as continuation
+  context, bounded by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX`; see §2.8.
 - Billing/Vertex AI path for production-grade Gemini reliability.
-- Mid-stream token-loss failover (resend prompt with full prefix) for long
-  generations.

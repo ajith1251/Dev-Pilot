@@ -146,7 +146,19 @@ Close the execution gap on top of the org graph.
   (7 router capability + 4 config parsing + 1 planner wiring); full suite
   **1667 passed / 18 skipped / 1 pre-existing env failure**.
 - **B3.** Mid-stream token-loss failover (resend prompt with full prefix) for long
-  generations.
+  generations. **✅ DONE (Session 35):** `chat_stream` resumes a stream that
+  drops AFTER delivering tokens on the next provider in the chain, resending the
+  full prompt with the partial output injected as continuation context
+  (`_continuation_messages`: `<partial>…</partial>` + do-not-repeat instruction)
+  so the response continues instead of restarting — no duplicated tokens, no lost
+  generation. Bounded per call by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX` (default
+  3, range 0–20; `0` disables recovery and restores surfaces-as-error). Each
+  hand-off is observable: `record_resume()` increments a per-provider `resumes`
+  counter surfaced in `provider_snapshots()`/`metrics_snapshot().totals`, and the
+  failover event carries `reason=mid_stream_token_loss`, `mid_stream=true`.
+  Docs: `MULTI_PROVIDER_ROUTING.md` §2.8. 5 new tests (4 resume behaviour + 1
+  config parse; `test_provider_router.py` now 59); full suite **1672 passed / 18
+  skipped / 1 pre-existing env failure**.
 
 ### C. Live E2E Verification (recommendation 4)
 
@@ -209,8 +221,8 @@ Close the execution gap on top of the org graph.
 ## 6. Next
 
 **Phase 20B hardening** (production reliability): B1 needs a user infra decision
-(billing on the Gemini key or Vertex AI); B3 mid-stream token-loss failover is
-the remaining unblocked B slice (B2 typed per-capability fallback chains
-**✅ DONE Session 34**). Then workstream D (org-graph UI parity on the React Flow
-engine) and E (extra test-framework parsers). Workstream C (live E2E) re-runs
-after a Gemini quota reset.
+(billing on the Gemini key or Vertex AI); **B2 (Session 34) and B3 (Session 35)
+are DONE** — typed per-capability fallback chains and mid-stream token-loss
+failover are both committed. Remaining: B1 (user decision), then workstream D
+(org-graph UI parity on the React Flow engine) and E (extra test-framework
+parsers). Workstream C (live E2E) re-runs after a Gemini quota reset.

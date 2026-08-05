@@ -253,6 +253,18 @@ class Settings(BaseSettings):
         alias="DEVPILOT_PROVIDER_RETRY_MAX_BACKOFF_SECONDS",
         description="Exponential backoff ceiling between retries.",
     )
+    PROVIDER_STREAM_RESUME_MAX: int = Field(
+        default=3, ge=0, le=20,
+        alias="DEVPILOT_PROVIDER_STREAM_RESUME_MAX",
+        description="Max mid-stream prefix-resends (Phase 20B token-loss "
+                    "recovery) for a single streaming call. When a stream is "
+                    "cut off after tokens were already delivered, the router "
+                    "resends the full prompt with the partial output injected "
+                    "as continuation context to the next provider in the "
+                    "chain, so the response continues instead of restarting. "
+                    "This caps the number of such resends per call; 0 "
+                    "disables mid-stream recovery entirely.",
+    )
     PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = Field(
         default=3, ge=1, le=100,
         alias="DEVPILOT_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD",

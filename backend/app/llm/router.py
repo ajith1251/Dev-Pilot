@@ -305,6 +305,7 @@ class ProviderHealth:
         self.failed_requests = 0
         self.retries = 0
         self.failovers = 0
+        self.resumes = 0
         self.last_latency_ms: Optional[float] = None
         self.avg_latency_ms: Optional[float] = None  # exponential moving average
         self.last_success_at: Optional[float] = None
@@ -344,6 +345,10 @@ class ProviderHealth:
     def record_failover(self) -> None:
         self.failovers += 1
 
+    def record_resume(self) -> None:
+        """Count a mid-stream prefix-resend (Phase 20B, token-loss recovery)."""
+        self.resumes += 1
+
     @property
     def success_rate(self) -> Optional[float]:
         if not self.results:
@@ -382,6 +387,7 @@ class ProviderHealth:
             "consecutive_failures": self.consecutive_failures,
             "retries": self.retries,
             "failovers": self.failovers,
+            "resumes": self.resumes,
             "avg_latency_ms": round(self.avg_latency_ms, 2)
                 if self.avg_latency_ms is not None else None,
             "last_latency_ms": round(self.last_latency_ms, 2)
@@ -446,14 +452,21 @@ class MetricsRegistry:
             self._health[name] = ProviderHealth(name, window=window)
         return self._health[name]
 
-    def record_failover(self, source: str, target: str, reason: str) -> None:
+    def record_failover(
+        self, source: str, target: str, reason: str, mid_stream: bool = False,
+    ) -> None:
         self.for_provider(source).record_failover()
         self.failover_events.append({
             "timestamp": time.time(),
             "from": source,
             "to": target,
             "reason": reason,
+            "mid_stream": mid_stream,
         })
+
+    def record_resume(self, name: str) -> None:
+        """Count a mid-stream prefix-resend on a provider."""
+        self.for_provider(name).record_resume()
 
     def totals(self) -> Dict[str, Any]:
         return {
@@ -462,6 +475,7 @@ class MetricsRegistry:
             "failed_requests": sum(h.failed_requests for h in self._health.values()),
             "retries": sum(h.retries for h in self._health.values()),
             "failovers": sum(h.failovers for h in self._health.values()),
+            "resumes": sum(h.resumes for h in self._health.values()),
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -759,16 +773,48 @@ class ProviderRouter:
             failures=failures,
         )
 
+    @staticmethod
+    def _continuation_messages(
+        messages: List[LLMMessage], prefix_parts: List[str],
+    ) -> List[LLMMessage]:
+        """Rebuild the prompt for a mid-stream continuation (Phase 20B B3).
+
+        The caller already delivered the partial output to the user; the new
+        provider must produce ONLY the remaining text. The partial output is
+        embedded as context with an explicit do-not-repeat instruction so the
+        response continues from exactly where it was cut off.
+        """
+        prefix = "".join(prefix_parts)
+        tail = LLMMessage(
+            role="user",
+            content=(
+                "The assistant response was interrupted mid-stream after "
+                "producing the partial text below. Continue the response "
+                "from exactly where it left off; do NOT repeat any of the "
+                "partial text — produce only the remaining output.\n\n"
+                f"<partial>{prefix}</partial>"
+            ),
+        )
+        return list(messages) + [tail]
+
     async def chat_stream(
         self,
         messages: List[LLMMessage],
         config: Optional[LLMConfig] = None,
         capability: Optional[str] = None,
     ) -> AsyncIterator[str]:
-        """Stream a chat call with failover only before the first token.
+        """Stream a chat call with failover + mid-stream token-loss recovery.
 
-        A failure mid-stream (after tokens have been yielded) is surfaced as
-        an error rather than retried — retrying would duplicate tokens.
+        Failover before the first token resends the FULL prompt to the next
+        provider. A failure mid-stream (tokens already delivered) is token
+        loss: when resume capacity remains
+        (``DEVPILOT_PROVIDER_STREAM_RESUME_MAX``) and a candidate provider
+        remains, the router resends the full prompt with the partial output
+        injected as continuation context so the response picks up where it
+        stopped instead of restarting (the caller keeps the tokens already
+        received). With no remaining candidate — or when resume capacity is
+        exhausted — the failure surfaces as ``LLMError``.
+
         ``capability``/``config.capability`` select the typed fallback chain.
         """
         cap = capability or (getattr(config, "capability", None) if config is not None else None)
@@ -778,14 +824,23 @@ class ProviderRouter:
                 "No provider is configured and circuit-healthy."
             )
 
+        resume_max = max(0, int(getattr(self._settings, "PROVIDER_STREAM_RESUME_MAX", 3)))
+        resume_budget = resume_max
+        prefix_parts: List[str] = []
+
         for index, entry in enumerate(entries):
             if not entry.breaker.allow_request():
                 continue
+            call_messages = (
+                self._continuation_messages(messages, prefix_parts)
+                if prefix_parts else messages
+            )
             yielded_any = False
             try:
-                stream = entry.provider.chat_stream(messages, config)  # type: ignore[union-attr]
+                stream = entry.provider.chat_stream(call_messages, config)  # type: ignore[union-attr]
                 async for chunk in stream:
                     yielded_any = True
+                    prefix_parts.append(chunk)
                     self._set_active(entry.name)
                     entry.health.record_success(0)
                     entry.breaker.record_success()
@@ -795,6 +850,20 @@ class ProviderRouter:
                 kind = classify_failure(exc)
                 entry.health.record_failure(0)
                 entry.breaker.record_failure()
+                if yielded_any and resume_budget > 0 and index + 1 < len(entries):
+                    resume_budget -= 1
+                    next_name = entries[index + 1].name
+                    self.metrics.record_resume(entry.name)
+                    self.metrics.record_failover(
+                        entry.name, next_name, "mid_stream_token_loss", mid_stream=True,
+                    )
+                    logger.warning(
+                        "[router] mid-stream token loss on %s (%s); "
+                        "continuing on %s with %d chars of prefix (resume %d/%d)",
+                        entry.name, kind.value, next_name, len("".join(prefix_parts)),
+                        resume_max - resume_budget, resume_max,
+                    )
+                    continue
                 if yielded_any:
                     raise LLMError(
                         f"Stream from provider '{entry.name}' failed "
@@ -892,6 +961,8 @@ class ProviderRouter:
                 "unhealthy_success_rate": float(
                     self._settings.PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE),
             },
+            "stream_resume_max": max(
+                0, int(getattr(self._settings, "PROVIDER_STREAM_RESUME_MAX", 3))),
             "providers": availability,
         })
         # Provider names are not secrets — expose them verbatim (the generic

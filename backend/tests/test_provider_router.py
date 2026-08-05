@@ -483,6 +483,128 @@ class TestRouterStreaming:
             assert chunks  # pragma: no cover
 
 
+class TestStreamResume:
+    """Phase 20B B3 — mid-stream token-loss recovery.
+
+    A stream that drops AFTER delivering tokens resumes on the next provider
+    with the partial output injected as continuation context (never a plain
+    restart), bounded by ``DEVPILOT_PROVIDER_STREAM_RESUME_MAX`` per call.
+    """
+
+    def _router(self, settings=None, providers=None, **kwargs) -> ProviderRouter:
+        settings = settings or _make_settings(PROVIDER_PRIORITY=["gemini", "openai", "anthropic"])
+        providers = providers or {}
+        return ProviderRouter(
+            factory=_StubFactory(providers),
+            settings=settings,
+            sleep=asyncio.sleep,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _mid_stream_breaker(chunk: str = "partial-"):
+        async def _breaker(messages, config=None):
+            yield chunk
+            raise Exception("network died")
+            yield "rest"  # pragma: no cover
+
+        return _breaker
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_resumes_on_next_provider_with_prefix(self) -> None:
+        seen: List[List[LLMMessage]] = []
+
+        async def _checking(messages, config=None):
+            seen.append(list(messages))
+            yield "cont-openai"
+
+        primary = _StubProvider("gemini", handler=self._mid_stream_breaker())
+        openai = _StubProvider("openai", handler=_checking)
+        r = self._router(providers={"gemini": primary, "openai": openai})
+
+        chunks = [c async for c in r.chat_stream(_msg())]
+
+        assert chunks == ["partial-", "cont-openai"]
+        assert r.active_provider == "openai"
+        # The next provider received the FULL prompt plus the continuation
+        # context carrying the already-delivered prefix — not a restart.
+        assert len(seen) == 1
+        last = seen[0][-1]
+        assert last.role == "user"
+        assert "<partial>partial-</partial>" in last.content
+        assert "do NOT repeat" in last.content
+        # Observability: one resume, one mid-stream failover.
+        assert r.metrics.totals()["resumes"] == 1
+        assert r.metrics.totals()["failovers"] == 1
+        event = r.metrics.failover_events[-1]
+        assert event["from"] == "gemini"
+        assert event["to"] == "openai"
+        assert event["reason"] == "mid_stream_token_loss"
+        assert event["mid_stream"] is True
+        gemini = next(e for e in r.entries if e.name == "gemini")
+        assert gemini.health.snapshot()["resumes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_resume_budget_is_bounded_by_resume_max(self) -> None:
+        # Budget 1: gemini drops → resume on openai; openai drops → budget is
+        # spent, so the error surfaces instead of another continuation.
+        r = self._router(
+            settings=_make_settings(
+                PROVIDER_PRIORITY=["gemini", "openai", "anthropic"],
+                PROVIDER_STREAM_RESUME_MAX=1,
+            ),
+            providers={
+                "gemini": _StubProvider("gemini", handler=self._mid_stream_breaker()),
+                "openai": _StubProvider("openai", handler=self._mid_stream_breaker()),
+                "anthropic": _StubProvider("anthropic"),
+            },
+        )
+        with pytest.raises(LLMError):
+            chunks = [c async for c in r.chat_stream(_msg())]
+            assert chunks  # pragma: no cover
+
+        assert r.metrics.totals()["resumes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_resume_repeats_across_chain_within_budget(self) -> None:
+        # Budget 3 lets the stream hop gemini → openai → anthropic before the
+        # healthy provider finishes the generation.
+        r = self._router(
+            settings=_make_settings(
+                PROVIDER_PRIORITY=["gemini", "openai", "anthropic"],
+                PROVIDER_STREAM_RESUME_MAX=3,
+            ),
+            providers={
+                "gemini": _StubProvider("gemini", handler=self._mid_stream_breaker()),
+                "openai": _StubProvider("openai", handler=self._mid_stream_breaker("partial2-")),
+                "anthropic": _StubProvider("anthropic"),
+            },
+        )
+        chunks = [c async for c in r.chat_stream(_msg())]
+        assert chunks == ["partial-", "partial2-", "chunk-anthropic"]
+        assert r.metrics.totals()["resumes"] == 2
+
+    @pytest.mark.asyncio
+    async def test_resume_disabled_surfaces_error_immediately(self) -> None:
+        r = self._router(
+            settings=_make_settings(
+                PROVIDER_PRIORITY=["gemini", "openai"],
+                PROVIDER_STREAM_RESUME_MAX=0,
+            ),
+            providers={
+                "gemini": _StubProvider("gemini", handler=self._mid_stream_breaker()),
+                "openai": _StubProvider("openai"),
+            },
+        )
+        with pytest.raises(LLMError):
+            chunks = [c async for c in r.chat_stream(_msg())]
+            assert chunks  # pragma: no cover
+
+        assert r.metrics.totals()["resumes"] == 0
+        openai = next(e for e in r.entries if e.name == "openai")
+        assert openai.provider.calls == 0  # never reached
+
+
 class TestCapabilityFallbacks:
     """Phase 20B — typed per-capability provider fallback chains."""
 
@@ -676,6 +798,13 @@ class TestProviderFallbacksConfig:
 
         s = Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS="Coding:GEMINI,OpenAI")
         assert s.LLM_PROVIDER_FALLBACKS == {"coding": ["gemini", "openai"]}
+
+    def test_stream_resume_max_parses(self) -> None:
+        from app.config import Settings
+
+        assert Settings(DEVPILOT_PROVIDER_STREAM_RESUME_MAX=5).PROVIDER_STREAM_RESUME_MAX == 5
+        assert Settings(DEVPILOT_PROVIDER_STREAM_RESUME_MAX=0).PROVIDER_STREAM_RESUME_MAX == 0
+        assert Settings(DEVPILOT_PROVIDER_STREAM_RESUME_MAX="2").PROVIDER_STREAM_RESUME_MAX == 2
 
 
 class TestRouterObservability:
