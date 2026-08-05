@@ -611,3 +611,90 @@ class TestGeminiTierConfig:
 
         assert Settings(DEVPILOT_GEMINI_PAID_MODELS="").GEMINI_PAID_MODELS == []
         assert Settings(DEVPILOT_GEMINI_PAID_MODELS=None).GEMINI_PAID_MODELS == []
+
+
+class TestOpenRouterProvider:
+    """OpenRouter provider — DEVPILOT_OPENROUTER_MODEL + sentinel handling."""
+
+    def test_requires_api_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.openrouter import OpenRouterProvider
+
+        with patch.object(settings, "OPENROUTER_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                OpenRouterProvider()
+
+    def test_default_model_uses_configured_openrouter_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openrouter import OpenRouterProvider
+
+        provider = OpenRouterProvider.__new__(OpenRouterProvider)
+        with patch.object(settings, "OPENROUTER_MODEL",
+                          "poolside/laguna-s-2.1:free"):
+            assert provider.default_model == "poolside/laguna-s-2.1:free"
+
+    def test_default_model_falls_back_to_auto_router(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openrouter import OpenRouterProvider
+
+        provider = OpenRouterProvider.__new__(OpenRouterProvider)
+        with patch.object(settings, "OPENROUTER_MODEL", None):
+            assert provider.default_model == "openrouter/auto"
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openrouter import OpenRouterProvider
+
+        provider = OpenRouterProvider.__new__(OpenRouterProvider)
+        with patch.object(settings, "OPENROUTER_MODEL",
+                          "poolside/laguna-s-2.1:free"):
+            # LLMConfig() defaults to "gpt-4o-mini" — treated as "unset"
+            assert provider._resolve_model(
+                LLMConfig()) == "poolside/laguna-s-2.1:free"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "poolside/laguna-s-2.1:free"
+            # an explicit OpenRouter model is honored
+            assert provider._resolve_model(
+                LLMConfig(model="cohere/north-mini-code:free")
+            ) == "cohere/north-mini-code:free"
+
+    def test_openrouter_model_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_OPENROUTER_MODEL="poolside/laguna-s-2.1:free")
+        assert s.OPENROUTER_MODEL == "poolside/laguna-s-2.1:free"
+        assert Settings(DEVPILOT_OPENROUTER_MODEL=None).OPENROUTER_MODEL is None
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openrouter import OpenRouterProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from openrouter"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=fake_response)
+
+        with patch.object(settings, "OPENROUTER_API_KEY", "or-test-key"), patch.object(
+            settings, "OPENROUTER_MODEL", "poolside/laguna-s-2.1:free"
+        ), patch("app.llm.providers.openrouter.AsyncOpenAI",
+                 return_value=fake_client):
+            provider = OpenRouterProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from openrouter"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "poolside/laguna-s-2.1:free"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]

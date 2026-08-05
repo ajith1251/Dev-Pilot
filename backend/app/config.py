@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     OPENROUTER_BASE_URL: str = Field(
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL",
     )
+    OPENROUTER_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_OPENROUTER_MODEL",
+        description="OpenRouter model override (OpenAI-compatible multi-model "
+                    "router), e.g. 'poolside/laguna-s-2.1:free' for the free "
+                    "tier. Unset defaults to 'openrouter/auto'. Independent of "
+                    "DEVPILOT_LLM_MODEL (which is OpenAI-biased) so the "
+                    "provider keeps its own default across failover.",
+    )
 
     # ─── Ollama (Phase 19B) ──────────────────────────────────────
     OLLAMA_BASE_URL: Optional[str] = Field(

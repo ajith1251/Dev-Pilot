@@ -42,7 +42,23 @@ class OpenRouterProvider(BaseLLMProvider):
 
     @property
     def default_model(self) -> str:
-        return "openrouter/auto"
+        # Independent of settings.LLM_MODEL (which is OpenAI-biased):
+        # DEVPILOT_OPENROUTER_MODEL pins the OpenRouter model (e.g. a ':free'
+        # slug) so all agent stages keep it, falling back to the auto router.
+        return settings.OPENROUTER_MODEL or "openrouter/auto"
+
+    def _resolve_model(self, cfg: LLMConfig) -> str:
+        """Pick the model for a call, ignoring the OpenAI-sentinel default.
+
+        Agents call provider.chat(..., config=LLMConfig(temperature=...)) with
+        no model, and LLMConfig() defaults to "gpt-4o-mini" (OpenAI-specific).
+        Sending that to OpenRouter would route to a wrong/unintended model, so
+        treat the sentinel value as "unset" and use the OpenRouter default.
+        """
+        model = (cfg.model or "").strip()
+        if not model or model == LLMConfig().model:
+            return self.default_model
+        return model
 
     async def chat(
         self,
@@ -53,8 +69,7 @@ class OpenRouterProvider(BaseLLMProvider):
         openai_messages = [
             {"role": m.role, "content": m.content} for m in messages
         ]
-        model = cfg.model if cfg.model and cfg.model != LLMConfig().model \
-            else self.default_model
+        model = self._resolve_model(cfg)
         try:
             response = await self._client.chat.completions.create(
                 model=model,
@@ -90,8 +105,7 @@ class OpenRouterProvider(BaseLLMProvider):
         openai_messages = [
             {"role": m.role, "content": m.content} for m in messages
         ]
-        model = cfg.model if cfg.model and cfg.model != LLMConfig().model \
-            else self.default_model
+        model = self._resolve_model(cfg)
         try:
             stream = await self._client.chat.completions.create(
                 model=model,

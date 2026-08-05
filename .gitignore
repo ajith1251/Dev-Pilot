@@ -32,5 +32,6 @@ yarn-error.log*
 
 # ── DevPilot specific ──────────────────────────────────────────
 backend/.env
+backend/.env.openrouter
 # Redaction-test fixture: only dummy values (sk-fake-key); tracked by exception
 !backend/tests/fixtures/fixture_f_sensitive/.env
