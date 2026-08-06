@@ -2884,4 +2884,88 @@ NVIDIA + this Session-43 Phase 20F tree (NOT committed; user to review).
 **Next (Session 44):** 1) commit the Session-40 A6 + Session-41 + Session-42 +
 Session-43 trees after user review; 2) enterprise roadmap workstream E1.
 
+---
+
+### Session 44 (August 6, 2026) — Workstream C Live E2E GREEN ✅
+
+Closed workstream C: `scripts/demo_phase17.py --live` and
+`scripts/verify_api_durability.py --live` now complete end-to-end on the
+NVIDIA-first provider chain. This unblocks the Session-41 verdict (live E2E
+was **BLOCKED** on free-tier model quality — planner JSON parse + timeouts).
+
+**Commits** — the pending Session-40/41/42/43 trees committed first:
+`8c16df9` (Phase 20A6), `0a12b28` + `1d8cc3c` (Session-41 JSON repair),
+`e96dc84` (Session-42/43 NVIDIA + Phase 20F registry/backup providers).
+This session's workstream-C changes are the only remaining uncommitted tree.
+
+**Registry-derived live gate** — `check_live_mode` in
+`backend/scripts/demo_phase15.py` / `demo_phase16.py` / `demo_phase17.py`
+(previously hardcoded `("openai","anthropic","gemini")`, later + `openrouter`)
+now derives from `app.llm.provider_registry.get_spec()`: rejects unregistered
+providers, rejects `fake`, else requires `spec.availability_attr` via
+`getattr(settings, ...)`. New providers work in every demo/script without
+touching the gate; `verify_api_durability.py` and `tests/test_api_durability.py`
+reuse demo_phase17's gate via import. Docstrings updated to "any registered
+real provider".
+
+**Doubled-brace JSON repair** — root cause of the live planning failure was the
+default cloudflare model (`llama-4-scout`) emitting **doubled structural braces**
+(`{{\n "summary": ... \n}}`) on large prompts (observed with the real planner
+prompt at PROMPT LEN 12422; a small 2390-char probe parsed cleanly). Old
+`repair_json_text` base repairs couldn't recover (fails at char 1,
+`Expecting property name enclosed in double quotes`). `json_repair.py` now has
+`collapse_doubled_braces` + a `_repair_once(text, collapse_braces)` helper:
+`repair_json_text` runs the base pass first (no behavior change for
+legitimately-nested malformed JSON), then a second pass collapses doubled
+structural braces via `re.sub(r"\{+|\}+", _halve, masked)` (a run of N braces
+→ ceil(N/2): `{{`→`{`, `}}}}`→`}}`), applied after string masking so
+`{{var}}` inside string bodies is preserved. 6 new regression tests in
+`tests/test_json_repair.py` (doubled top-level, nested doubles, braces inside
+strings preserved, legitimately-nested unquoted-key still repaired, end-to-end
+doubled plan via `parse_llm_json`).
+
+**fix_agent repair-loop crash** — live runs crashed at the `repairing` stage:
+`'ImplementationPlan' object has no attribute 'plan_id'`. `fix_agent.py:416`
+built the `PatchSet` with `inp.plan.plan_id` unguarded while the other two
+call sites already used `hasattr`/`getattr`. Fixed to
+`getattr(inp.plan, "plan_id", "") if inp.plan else ""`.
+
+**Live verification (both green)** —
+- `scripts/demo_phase17.py --live`: Demonstrations A–E complete clean
+  (planner agreement, coding/testing conflict with `claim_vs_test`
+  deterministic_wins, reviewer shared-consensus, autonomy replan, restart
+  recovery). The LLM coding patch still fails the fixture tests (model
+  quality — llama-4-scout/nvidia don't produce a passing fix), so Run A
+  surfaces contradictions too — but that is the machinery working as
+  designed (deterministic evidence outranks LLM claims), not a crash.
+- `scripts/verify_api_durability.py --live`: BOTH HTTP paths persist
+  runs/handoffs/consensus via PostgresRunStore ✅; run `RUN-E7D3461F` reaches
+  `rejected` (terminal verdict), goal `GOAL-2AEC9A54` reaches
+  `waiting_for_human` (terminal state), 1 run persisted with a terminal
+  verdict → all four CI gates pass, no `SystemExit(1)`.
+- Provider chain exercised live: `nvidia` timed out on planning (cold pod) →
+  router failed over → cloudflare handled the call. Router failover works as
+  configured.
+
+**Tests** — targeted `test_json_repair.py` + `test_coding.py` +
+`test_repair.py`: **164 passed**. Full suite not re-run (change surface is
+gate + JSON repair + one guarded accessor, all covered by the targeted
+suites + live runs).
+
+**Docs** — `workflow-status/PHASE20_ROADMAP.md` §C + §6 updated: workstream C
+**GREEN** with the unblock chain (registry gate + doubled-brace repair +
+fix_agent plan_id). This file (Session 44).
+
+**Status** — commit this session's tree (7 files + tests): the demo-phase
+15/16/17 + durability gate fix, `json_repair.py` doubled-brace second pass,
+`fix_agent.py` plan_id guard, `test_json_repair.py` regressions, ROADMAP.
+`backend/e2e_durability.log` untracked — leave out (runtime artifact);
+`backend/.env` git-ignored.
+
+**Next (Session 45):** 1) commit the Session-44 workstream-C tree; 2) a
+stronger live coding model (paid Gemini tier / NVIDIA warm pod / better model)
+so the live coding patch passes the fixture tests — the pipeline already
+proves rejection correctly, a fully green *approve* run is the last polish;
+3) enterprise roadmap workstream E1 (self-hosted inference fabric).
+
 

@@ -28,9 +28,9 @@ Live mode (--live): drives BOTH API paths against the configured LLM
 provider with real stage bodies — (1) `POST /api/v1/runs` (one real
 `execute_run`) and (2) `POST /api/v1/autonomy/run` (one real autonomous
 goal loop) — then verifies runs / handoffs / consensus persist via
-PostgresRunStore end-to-end. Requires DEVPILOT_LLM_PROVIDER=openai (or
-anthropic/gemini) AND the matching API key in .env; the workspace is
-copied from tests/fixtures/fixture_auth_app.
+PostgresRunStore end-to-end. Requires DEVPILOT_LLM_PROVIDER set to a
+registered real provider (any provider except 'fake') and its key in .env;
+the workspace is copied from tests/fixtures/fixture_auth_app.
 
 CI gate: in live mode the script EXITS 1 (non-zero) when either path fails
 to reach a terminal outcome — the run must reach a verdict (approved /

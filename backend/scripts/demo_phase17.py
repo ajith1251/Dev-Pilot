@@ -19,8 +19,8 @@ Mode:
     would, so the orchestrator's real handoff / decision / reasoning wiring
     runs against a live PostgreSQL database (migration 010).
   * live (--live) — runs a REAL execute_run using the configured LLM
-    provider. Requires DEVPILOT_LLM_PROVIDER=openai (or anthropic/gemini)
-    AND OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY.
+    provider. Requires DEVPILOT_LLM_PROVIDER set to a registered real
+    provider (any provider except 'fake') and its key in .env.
 
 Security invariant (unchanged): only evidence, confidence, decisions and
 consensus are exposed — never chain-of-thought.
@@ -120,17 +120,23 @@ def build_memory_service(db_url: str):
 
 
 def check_live_mode() -> bool:
+    """Validate that a real LLM run is actually possible (any registered
+    provider except the deterministic 'fake', with its config attr set)."""
     from app.config import settings
     from app.core.exceptions import LLMProviderNotFound
     from app.llm.factory import factory as llm_factory
+    from app.llm.provider_registry import get_spec
 
     provider = (settings.LLM_PROVIDER or "").lower()
-    real = ("openai", "anthropic", "gemini", "openrouter")
-    if provider not in real:
-        print(f"  [error] --live requires a real LLM provider; "
-              f"DEVPILOT_LLM_PROVIDER='{provider}' is not "
-              f"{'/'.join(real)} "
+    spec = get_spec(provider)
+    if spec is None:
+        print(f"  [error] --live requires a registered LLM provider. "
+              f"DEVPILOT_LLM_PROVIDER='{provider}' is not registered "
               f"(available: {sorted(llm_factory._providers)}).")
+        return False
+    if provider == "fake":
+        print("  [error] --live requires a real LLM provider; 'fake' is the "
+              "deterministic in-memory fallback used by tests.")
         return False
     try:
         llm_factory.get_provider(provider)
@@ -139,15 +145,10 @@ def check_live_mode() -> bool:
               f"DEVPILOT_LLM_PROVIDER='{provider}' is not registered "
               f"(available: {sorted(llm_factory._providers)}).")
         return False
-    key = {
-        "openai": settings.OPENAI_API_KEY,
-        "anthropic": settings.ANTHROPIC_API_KEY,
-        "gemini": settings.GEMINI_API_KEY,
-        "openrouter": settings.OPENROUTER_API_KEY,
-    }.get(provider)
-    if not key:
-        print(f"  [error] --live requires {provider.upper()}_API_KEY in .env.")
-        return False
+    if not spec.always_available and spec.availability_attr:
+        if not getattr(settings, spec.availability_attr, None):
+            print(f"  [error] --live requires {spec.availability_attr} in .env.")
+            return False
     return True
 
 

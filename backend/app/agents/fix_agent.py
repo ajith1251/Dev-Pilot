@@ -413,7 +413,7 @@ class FixAgent(BaseAgent[FixAgentInput, FixAgentOutput]):
             patch=PatchSet(
                 patch_id=f"repair-{new_id()[:8]}-{inp.attempt_number}",
                 changes=changes,
-                plan_id=inp.plan.plan_id if inp.plan else "",
+                plan_id=getattr(inp.plan, "plan_id", "") if inp.plan else "",
                 warnings=parse_warnings,
                 metadata={"repair_attempt": inp.attempt_number},
             ),

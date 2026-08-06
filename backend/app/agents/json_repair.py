@@ -2,9 +2,10 @@
 
 Extracted from PlannerAgent so the same recovery pipeline (smart quotes,
 control chars, trailing commas, single-quoted strings, unquoted keys, bare
-None/True/False) is available to every agent that parses model JSON —
-currently the planner and the coding agent (whose live failures surfaced the
-same "Expecting property name enclosed in double quotes" class of bug).
+None/True/False, doubled structural braces) is available to every agent that
+parses model JSON — currently the planner and the coding agent (whose live
+failures surfaced the same "Expecting property name enclosed in double
+quotes" class of bug).
 
 Every function here is pure and raises only on programmer error; the parse
 helpers never raise on bad input, they degrade to the documented fallback.
@@ -118,13 +119,41 @@ def unmask_string_contents(masked: str, tokens: List[str]) -> str:
     return masked
 
 
+def collapse_doubled_braces(masked: str) -> str:
+    """Collapse doubled structural braces (``{{ ... }}``) emitted by weaker
+    models on large prompts (e.g. llama-4-scout), which double every opening/
+    closing brace — including nested objects. Because each brace is doubled,
+    a run of N structural braces stands for ceil(N/2) real ones (run of 2 →
+    1, run of 4 → 2). String bodies are already masked at this point, so
+    ``{{``/``}}`` inside values is never touched. Best effort — repair only
+    runs when direct json.loads already failed."""
+    def _halve(match: "re.Match[str]") -> str:
+        ch = match.group(0)[0]
+        n = match.end() - match.start()
+        return ch * ((n + 1) // 2)
+
+    return re.sub(r"\{+|\}+", _halve, masked)
+
+
 def repair_json_text(text: str) -> Optional[str]:
     """Best-effort repair of common malformed JSON emitted by weaker LLMs.
 
     Applies cumulative fixes (unicode punctuation, control chars, trailing
     commas, single-quoted strings, unquoted keys, bare None/True/False) and
     returns the repaired text only if it finally parses as JSON.
+
+    When the base repairs fail, a second pass additionally collapses doubled
+    structural braces (``{{ ... }}``) emitted by some models (e.g. the
+    llama-4-scout default) on large prompts. The second pass is a fallback so
+    the base repairs never regress on legitimately-nested malformed JSON.
     """
+    first = _repair_once(text, collapse_braces=False)
+    if first is not None:
+        return first
+    return _repair_once(text, collapse_braces=True)
+
+
+def _repair_once(text: str, collapse_braces: bool) -> Optional[str]:
     t = text
     for src, dst in (
         ("\u201c", '"'), ("\u201d", '"'),
@@ -140,6 +169,8 @@ def repair_json_text(text: str) -> Optional[str]:
     t = fix_single_quotes(t)
     masked, tokens = mask_string_contents(t)
 
+    if collapse_braces:
+        masked = collapse_doubled_braces(masked)
     masked = re.sub(r",\s*([}\]])", r"\1", masked)
     masked = re.sub(
         r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', masked

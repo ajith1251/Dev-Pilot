@@ -130,20 +130,23 @@ def build_memory_service(db_url: str):
 
 
 def check_live_mode() -> bool:
-    """Validate that a real LLM run is actually possible."""
+    """Validate that a real LLM run is actually possible (any registered
+    provider except the deterministic 'fake', with its config attr set)."""
     from app.config import settings
     from app.core.exceptions import LLMProviderNotFound
     from app.llm.factory import factory as llm_factory
+    from app.llm.provider_registry import get_spec
 
     provider = (settings.LLM_PROVIDER or "").lower()
-    real = ("openai", "anthropic", "gemini")
-    if provider not in real:
-        print(f"  [error] --live requires a real LLM provider; "
-              f"DEVPILOT_LLM_PROVIDER='{provider}' is not "
-              f"{'/'.join(real)} "
+    spec = get_spec(provider)
+    if spec is None:
+        print(f"  [error] --live requires a registered LLM provider. "
+              f"DEVPILOT_LLM_PROVIDER='{provider}' is not registered "
               f"(available: {sorted(llm_factory._providers)}).")
-        print("          Set DEVPILOT_LLM_PROVIDER=openai (or anthropic/gemini) "
-              "and add OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY to .env.")
+        return False
+    if provider == "fake":
+        print("  [error] --live requires a real LLM provider; 'fake' is the "
+              "deterministic in-memory fallback used by tests.")
         return False
     try:
         llm_factory.get_provider(provider)
@@ -152,14 +155,10 @@ def check_live_mode() -> bool:
               f"DEVPILOT_LLM_PROVIDER='{provider}' is not registered "
               f"(available: {sorted(llm_factory._providers)}).")
         return False
-    key = {
-        "openai": settings.OPENAI_API_KEY,
-        "anthropic": settings.ANTHROPIC_API_KEY,
-        "gemini": settings.GEMINI_API_KEY,
-    }.get(provider)
-    if not key:
-        print(f"  [error] --live requires {provider.upper()}_API_KEY in .env.")
-        return False
+    if not spec.always_available and spec.availability_attr:
+        if not getattr(settings, spec.availability_attr, None):
+            print(f"  [error] --live requires {spec.availability_attr} in .env.")
+            return False
     return True
 
 

@@ -13,6 +13,7 @@ from app.agents.json_repair import (
     repair_json_text,
     unmask_string_contents,
 )
+import json
 
 
 class TestFixSingleQuotes:
@@ -84,6 +85,34 @@ class TestRepairJsonText:
 
     def test_already_valid_unchanged(self):
         assert repair_json_text('{"a": 1}') == '{"a": 1}'
+
+    def test_doubled_braces_collapsed(self):
+        text = '{{\n  "a": 1\n}}'
+        assert json.loads(repair_json_text(text)) == {"a": 1}
+
+    def test_doubled_braces_nested(self):
+        text = '{{"a": {{"b": 1}}, "c": {{"d": [1, 2]}}}}'
+        assert repair_json_text(text) == '{"a": {"b": 1}, "c": {"d": [1, 2]}}'
+
+    def test_doubled_braces_inside_string_preserved(self):
+        text = '{"summary": "use {{var}} in template", "a": 1}}'
+        assert repair_json_text(text) == (
+            '{"summary": "use {{var}} in template", "a": 1}'
+        )
+
+    def test_legitimately_nested_unquoted_key_still_repaired(self):
+        assert repair_json_text('{a:{"b":1}}') == '{"a":{"b":1}}'
+
+    def test_doubled_braces_end_to_end_plan(self):
+        text = (
+            '{{\n  "summary": "s",\n  "steps": [\n'
+            '    {{"id": "STEP-001", "title": "t"}}\n  ],\n'
+            '  "requirements_coverage": {{\n    "REQ-001": ["STEP-001"]\n  }}\n}}'
+        )
+        parsed = parse_llm_json(text)
+        assert parsed["summary"] == "s"
+        assert parsed["steps"] == [{"id": "STEP-001", "title": "t"}]
+        assert parsed["requirements_coverage"] == {"REQ-001": ["STEP-001"]}
 
 
 class TestExtractJsonObject:
