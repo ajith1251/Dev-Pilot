@@ -400,6 +400,21 @@ class RunSource(BaseModel):
         description="Per-repository patches to validate/apply against each "
                     "repository's own checkout (Phase 20A4)",
     )
+    # Phase 20A6: optional run-creation metadata surfaced on the dashboard.
+    # Advisory — the orchestrator pipeline is unchanged; these are recorded
+    # and displayed as evidence (acceptance criteria + execution budget hints
+    # set by the caller at creation time).
+    acceptance_criteria: List[str] = Field(
+        default_factory=list,
+        description="Acceptance criteria declared when creating the run "
+                    "(Phase 20A6)",
+    )
+    execution_budget: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional advisory execution-budget metadata (e.g. "
+                    "max_iterations, max_replans) declared at creation "
+                    "(Phase 20A6)",
+    )
 
 
 class StageResult(BaseModel):

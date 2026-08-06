@@ -220,6 +220,15 @@ class OrchestrationService:
         self._repository_scopes: Optional[Any] = None
         self._repo_scope_run_id: Optional[str] = None
 
+    def get_organization_graph(self) -> Any:
+        """Public accessor for the shared OrganizationKnowledgeGraphService.
+
+        Used by the API layer to build repository-aware dashboard views
+        (Phase 20A6) against the SAME instance that materialized the run's
+        auxiliary repositories — never a fresh, empty service.
+        """
+        return self._get_org_graph()
+
     # ── WebSocket Broadcasts ─────────────────────────────────────
 
     async def _broadcast_update(self, run: DevPilotRun) -> None:
@@ -265,6 +274,21 @@ class OrchestrationService:
                 "total_duration_ms": run.total_duration_ms,
                 "cancellation_requested": run.cancellation_requested,
             }
+            # Phase 20A6: repository-aware payload so the dashboard's
+            # repository cards + organization summary update live.
+            from app.services.run_dashboard import (
+                build_organization_summary,
+                build_repository_view,
+            )
+
+            data["auxiliary_repositories"] = run.auxiliary_repositories
+            data["repo_validation"] = [r.summary() for r in run.repo_patches]
+            data["repositories"] = build_repository_view(
+                run, org_service=self._get_org_graph()
+            )
+            data["organization_summary"] = build_organization_summary(
+                run, org_service=self._get_org_graph()
+            )
             await ws.broadcast_run_update(run.run_id, data)
             # Also broadcast a lightweight event
             await ws.broadcast_event(

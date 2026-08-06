@@ -5,6 +5,9 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { runsApi, orchestrationApi } from "@/lib/api/client";
 import { useRunListWebSocket } from "@/lib/hooks/useRunWebSocket";
+import RepositorySelector, {
+  type RepositorySelection,
+} from "@/components/runs/RepositorySelector";
 import type {
   RunStatus,
   StageType,
@@ -12,6 +15,16 @@ import type {
   Capabilities,
   AuxiliaryRepositorySpec,
 } from "@/lib/api/client";
+
+const RELATIONSHIP_OPTIONS = [
+  "depends_on_repository",
+  "shares_library",
+  "imports_package",
+  "implements_shared_interface",
+  "references_shared_component",
+  "uses_shared_memory",
+  "calls_external_service",
+];
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -560,6 +573,17 @@ function RunCard({ run }: { run: RunSummary }) {
         <span>{totalStages} pipeline stages</span>
         <span>·</span>
         <span className="capitalize">{run.source.replace(/_/g, " ")}</span>
+        {(run.repository_count ?? 1) > 1 && (
+          <>
+            <span>·</span>
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-medium">
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 6.75h.75m-.75 3h.75m-.75 3h.75m3-6h.75m-.75 3h.75m-.75 3h.75M6.75 21v-3.375c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21M3 3h12m-.75 4.5H21m-3.75 3.75h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008z" />
+              </svg>
+              {run.repository_count} repos
+            </span>
+          </>
+        )}
       </div>
     </Link>
   );
@@ -577,12 +601,60 @@ function CreateRunModal({ onClose, onCreated }: {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase 20A6: acceptance criteria + execution budgets.
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
+  const [budgetMaxIterations, setBudgetMaxIterations] = useState("");
+  const [budgetMaxReplans, setBudgetMaxReplans] = useState("");
+
+  // Phase 20A6: organization repository selector.
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectedOrgRepos, setSelectedOrgRepos] = useState<Set<string>>(new Set());
+
   const setAuxRepo = useCallback((i: number, patch: Partial<AuxiliaryRepositorySpec>) => {
     setAuxRepos((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }, []);
 
   const removeAuxRepo = useCallback((i: number) => {
     setAuxRepos((prev) => prev.filter((_, idx) => idx !== i));
+  }, []);
+
+  // Repository ordering (Phase 20A6): stable reorder of auxiliary repos.
+  const moveAuxRepo = useCallback((i: number, dir: -1 | 1) => {
+    setAuxRepos((prev) => {
+      const target = i + dir;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[target]] = [next[target], next[i]];
+      return next;
+    });
+  }, []);
+
+  const toggleOrgRepo = useCallback((selection: RepositorySelection) => {
+    setSelectedOrgRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(selection.repository_id)) {
+        next.delete(selection.repository_id);
+      } else {
+        next.add(selection.repository_id);
+      }
+      return next;
+    });
+  }, []);
+
+  const confirmOrgRepos = useCallback((chosen: RepositorySelection[]) => {
+    setAuxRepos((prev) => {
+      const existing = new Set(prev.map((r) => r.repository_id));
+      const additions: AuxiliaryRepositorySpec[] = chosen
+        .filter((c) => !existing.has(c.repository_id))
+        .map((c) => ({
+          repository_id: c.repository_id,
+          name: c.name,
+          source: "local",
+          path: c.path || undefined,
+          depth: 1,
+        }));
+      return [...prev, ...additions];
+    });
   }, []);
 
   const handleCreate = useCallback(async () => {
@@ -598,6 +670,13 @@ function CreateRunModal({ onClose, onCreated }: {
         path: r.source === "local" ? r.path?.trim() || undefined : undefined,
         ref: r.source === "github" ? r.ref?.trim() || undefined : undefined,
         depth: r.source === "github" && r.depth ? r.depth : undefined,
+        relationships: (r.relationships || [])
+          .filter((rel) => rel.target_repository_id.trim())
+          .map((rel) => ({
+            target_repository_id: rel.target_repository_id.trim(),
+            relationship: rel.relationship || "depends_on_repository",
+            weight: rel.weight ?? 1.0,
+          })),
       }))
       .filter(
         (r) =>
@@ -606,6 +685,16 @@ function CreateRunModal({ onClose, onCreated }: {
             ? Boolean(r.owner && r.repo)
             : Boolean(r.path))
       );
+    // Phase 20A6: acceptance criteria (one per line) + execution budget.
+    const criteria = acceptanceCriteria
+      .split("\n")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    const execution_budget: Record<string, unknown> = {};
+    const maxIter = parseInt(budgetMaxIterations, 10);
+    const maxReplans = parseInt(budgetMaxReplans, 10);
+    if (!Number.isNaN(maxIter) && maxIter > 0) execution_budget.max_iterations = maxIter;
+    if (!Number.isNaN(maxReplans) && maxReplans > 0) execution_budget.max_replans = maxReplans;
     setCreating(true);
     setError(null);
     try {
@@ -614,6 +703,8 @@ function CreateRunModal({ onClose, onCreated }: {
         description: description.trim(),
         repository: repo.trim() || undefined,
         repositories: repositories.length > 0 ? repositories : undefined,
+        acceptance_criteria: criteria.length > 0 ? criteria : undefined,
+        execution_budget: Object.keys(execution_budget).length > 0 ? execution_budget : undefined,
       });
       if (result.data?.run_id) {
         onCreated(result.data.run_id);
@@ -623,9 +714,10 @@ function CreateRunModal({ onClose, onCreated }: {
     } finally {
       setCreating(false);
     }
-  }, [title, description, repo, auxRepos, onCreated]);
+  }, [title, description, repo, auxRepos, acceptanceCriteria, budgetMaxIterations, budgetMaxReplans, onCreated]);
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <div
         className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-xl mx-4 p-6"
@@ -676,13 +768,22 @@ function CreateRunModal({ onClose, onCreated }: {
               <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
                 Auxiliary Repositories <span className="text-slate-400 dark:text-slate-500">(optional)</span>
               </label>
-              <button
-                type="button"
-                onClick={() => setAuxRepos((prev) => [...prev, { repository_id: "", source: "local", depth: 1 }])}
-                className="text-[11px] font-medium text-primary-600 dark:text-primary-400 hover:text-primary-500 transition-colors"
-              >
-                + Add repo
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectorOpen(true)}
+                  className="text-[11px] font-medium text-primary-600 dark:text-primary-400 hover:text-primary-500 transition-colors"
+                >
+                  Select from org
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuxRepos((prev) => [...prev, { repository_id: "", source: "local", depth: 1 }])}
+                  className="text-[11px] font-medium text-primary-600 dark:text-primary-400 hover:text-primary-500 transition-colors"
+                >
+                  + Add repo
+                </button>
+              </div>
             </div>
             <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-2">
               Additional repositories materialized via the org graph and kept isolated from the primary checkout.
@@ -696,6 +797,31 @@ function CreateRunModal({ onClose, onCreated }: {
               {auxRepos.map((aux, i) => (
                 <div key={i} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3 space-y-2">
                   <div className="flex items-center gap-2">
+                    <div className="flex flex-col shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => moveAuxRepo(i, -1)}
+                        disabled={i === 0}
+                        className="p-0.5 text-slate-400 hover:text-primary-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Move repository up"
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveAuxRepo(i, 1)}
+                        disabled={i === auxRepos.length - 1}
+                        className="p-0.5 text-slate-400 hover:text-primary-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Move repository down"
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                        </svg>
+                      </button>
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-400 shrink-0">#{i + 1}</span>
                     <input
                       type="text" value={aux.repository_id}
                       onChange={(e) => setAuxRepo(i, { repository_id: e.target.value })}
@@ -750,8 +876,115 @@ function CreateRunModal({ onClose, onCreated }: {
                       className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
                     />
                   )}
+
+                  {/* Dependency visualization (Phase 20A6) — explicit cross-repo links */}
+                  <div className="pt-1">
+                    <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-1">
+                      Dependencies <span className="text-slate-400 dark:text-slate-500">(optional)</span>
+                    </p>
+                    <div className="space-y-1.5">
+                      {(aux.relationships || []).map((rel, ri) => (
+                        <div key={ri} className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-400">→</span>
+                          <input
+                            type="text"
+                            value={rel.target_repository_id}
+                            onChange={(e) => {
+                              const rels = [...(aux.relationships || [])];
+                              rels[ri] = { ...rels[ri], target_repository_id: e.target.value };
+                              setAuxRepo(i, { relationships: rels });
+                            }}
+                            placeholder="target repository id"
+                            className="flex-1 px-2 py-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-[11px] focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                          />
+                          <select
+                            value={rel.relationship || "depends_on_repository"}
+                            onChange={(e) => {
+                              const rels = [...(aux.relationships || [])];
+                              rels[ri] = { ...rels[ri], relationship: e.target.value };
+                              setAuxRepo(i, { relationships: rels });
+                            }}
+                            className="px-2 py-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-[11px] focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                          >
+                            {RELATIONSHIP_OPTIONS.map((r) => (
+                              <option key={r} value={r}>{r.replace(/_/g, " ")}</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rels = (aux.relationships || []).filter((_, x) => x !== ri);
+                              setAuxRepo(i, { relationships: rels });
+                            }}
+                            className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+                            aria-label="Remove dependency"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setAuxRepo(i, {
+                          relationships: [
+                            ...(aux.relationships || []),
+                            { target_repository_id: "", relationship: "depends_on_repository", weight: 1.0 },
+                          ],
+                        })}
+                        className="text-[10px] font-medium text-primary-600 dark:text-primary-400 hover:text-primary-500 transition-colors"
+                      >
+                        + Add dependency
+                      </button>
+                    </div>
+                  </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Acceptance criteria (Phase 20A6) */}
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+              Acceptance Criteria <span className="text-slate-400 dark:text-slate-500">(one per line)</span>
+            </label>
+            <textarea
+              value={acceptanceCriteria}
+              onChange={(e) => setAcceptanceCriteria(e.target.value)}
+              rows={2}
+              placeholder={"e.g.\nQuantity must reject negative values\nUnit tests cover the new validator"}
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all resize-none"
+            />
+          </div>
+
+          {/* Execution budget (Phase 20A6) */}
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                Max Iterations
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={budgetMaxIterations}
+                onChange={(e) => setBudgetMaxIterations(e.target.value)}
+                placeholder="auto"
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                Max Replans
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={budgetMaxReplans}
+                onChange={(e) => setBudgetMaxReplans(e.target.value)}
+                placeholder="auto"
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+              />
             </div>
           </div>
         </div>
@@ -785,6 +1018,16 @@ function CreateRunModal({ onClose, onCreated }: {
         </div>
       </div>
     </div>
+
+    {/* Phase 20A6: organization repository selector */}
+    <RepositorySelector
+      open={selectorOpen}
+      onClose={() => setSelectorOpen(false)}
+      selected={selectedOrgRepos}
+      onToggle={toggleOrgRepo}
+      onConfirm={confirmOrgRepos}
+    />
+    </>
   );
 }
 

@@ -17,6 +17,8 @@ interface WsRunUpdate {
       title: string;
       description: string;
       repository_path?: string | null;
+      acceptance_criteria?: string[];
+      execution_budget?: Record<string, unknown>;
     };
     current_stage: string;
     created_at: string;
@@ -31,6 +33,10 @@ interface WsRunUpdate {
     warnings: string[];
     total_duration_ms?: number | null;
     cancellation_requested: boolean;
+    auxiliary_repositories?: Array<Record<string, unknown>>;
+    repo_validation?: Array<Record<string, unknown>>;
+    repositories?: Array<Record<string, unknown>>;
+    organization_summary?: Record<string, unknown>;
   };
 }
 
@@ -75,6 +81,8 @@ export interface RunWebSocketState {
       title: string;
       description: string;
       repository_path?: string | null;
+      acceptance_criteria?: string[];
+      execution_budget?: Record<string, unknown>;
     };
     current_stage: string;
     created_at: string;
@@ -89,6 +97,10 @@ export interface RunWebSocketState {
     warnings: string[];
     total_duration_ms?: number | null;
     cancellation_requested: boolean;
+    auxiliary_repositories?: Array<Record<string, unknown>>;
+    repo_validation?: Array<Record<string, unknown>>;
+    repositories?: Array<Record<string, unknown>>;
+    organization_summary?: Record<string, unknown>;
   } | null;
   /** Latest events received (accumulated) */
   events: Array<{

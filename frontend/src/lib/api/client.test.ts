@@ -5,7 +5,7 @@
  * `auxiliary_repositories` + `repo_validation` surface.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runsApi } from "./client";
+import { orgApi, runsApi } from "./client";
 
 function mockFetch(json: unknown) {
   const fn = vi.fn().mockResolvedValue({
@@ -72,5 +72,52 @@ describe("runsApi.create (Phase 20 A6)", () => {
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.repositories).toBeUndefined();
+  });
+
+  it("forwards acceptance criteria + execution budget (Phase 20A6)", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: { run_id: "RUN-3", status: "running" },
+    });
+    await runsApi.create({
+      title: "Budgeted task",
+      acceptance_criteria: ["c1", "c2"],
+      execution_budget: { max_iterations: 3, max_replans: 2 },
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.acceptance_criteria).toEqual(["c1", "c2"]);
+    expect(body.execution_budget).toEqual({ max_iterations: 3, max_replans: 2 });
+  });
+});
+
+describe("orgApi.repositories (Phase 20A6)", () => {
+  it("GETs /api/v1/graph/org/repositories with search + pagination params", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        repositories: [{ repository_id: "repo-b" }],
+        count: 1,
+        total: 42,
+        limit: 25,
+        offset: 0,
+      },
+    });
+    const result = await orgApi.repositories({ q: "api", limit: 25, offset: 0 });
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/graph/org/repositories?q=api&limit=25&offset=0");
+    expect(result.data.total).toBe(42);
+    expect(result.data.repositories[0].repository_id).toBe("repo-b");
+  });
+
+  it("GETs per-repository EKG stats by id", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: { repository_id: "repo-b", node_count: 5, edge_count: 4 },
+    });
+    const result = await orgApi.repository("repo-b");
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/graph/org/repositories/repo-b");
+    expect(result.data.node_count).toBe(5);
   });
 });

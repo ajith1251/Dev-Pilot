@@ -314,7 +314,8 @@ def main() -> None:
         elif args.graph_command == "org-stats":
             asyncio.run(run_graph_org_stats(args.json))
         elif args.graph_command == "org-repositories":
-            asyncio.run(run_graph_org_repositories(args.json))
+            asyncio.run(run_graph_org_repositories(
+                args.json, args.q, args.organization, args.limit, args.offset))
         elif args.graph_command == "org-cross-edges":
             asyncio.run(run_graph_org_cross_edges(args.json))
         elif args.graph_command == "org-query":
@@ -875,9 +876,10 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
     )
     from app.models.coding import PatchSet
 
-    print(f"\n{'='*60}\n  DevPilot Run (Phase 10)\n{'='*60}")
-    print(f"  Repository: {repo}")
-    print(f"  Task:       {task[:80]}\n{'='*60}\n")
+    if not json_output:
+        print(f"\n{'='*60}\n  DevPilot Run (Phase 10)\n{'='*60}")
+        print(f"  Repository: {repo}")
+        print(f"  Task:       {task[:80]}\n{'='*60}\n")
 
     repositories = None
     for entry in (aux_repo or []):
@@ -923,13 +925,28 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
 
     orch = OrchestrationService()
     run = orch.create_run(source)
-    print(f"  Run ID: {run.run_id}\n")
+    if not json_output:
+        print(f"  Run ID: {run.run_id}\n")
 
     result = await orch.execute_run(run_id=run.run_id, workspace_root=repo)
 
     if json_output:
         import json
-        print(json.dumps(result.model_dump(mode="json", exclude_none=True), indent=2))
+        # Phase 20A6: repository-aware dashboard output — participating
+        # repositories + organization summary merged into the JSON result.
+        from app.services.run_dashboard import (
+            build_organization_summary,
+            build_repository_view,
+        )
+
+        payload = result.model_dump(mode="json", exclude_none=True)
+        payload["repositories"] = build_repository_view(
+            result, org_service=orch.get_organization_graph()
+        )
+        payload["organization_summary"] = build_organization_summary(
+            result, org_service=orch.get_organization_graph()
+        )
+        print(json.dumps(payload, indent=2))
         return
 
     # Display stages
@@ -972,6 +989,54 @@ async def run_orchestration(repo: str, task: str, description: str = "", json_ou
             )
             for err in rv.validation_errors[:3]:
                 print(f"      - {err}")
+
+    # Phase 20A6: repository-aware dashboard view (participating repositories,
+    # per-repository progress, organization summary).
+    from app.services.run_dashboard import (
+        build_organization_summary,
+        build_repository_view,
+    )
+
+    repos = build_repository_view(result, org_service=orch.get_organization_graph())
+    if repos:
+        print(f"\n  {'='*56}\n  Participating Repositories (Phase 20A6)\n  {'='*56}")
+        stage_icons = {
+            "succeeded": "✓", "failed": "✗", "running": "●",
+            "skipped": "○", "pending": "·",
+        }
+        for r in repos:
+            tag = "primary" if r["is_primary"] else "aux "
+            print(f"  [{tag}] {r['repository_id']:<22} {r['name'][:28]:<30} "
+                  f"stage={r['current_stage']}")
+            progress = "  ".join(
+                f"{stage_icons.get(s, '?'):<1}{name[:1].upper()}"
+                for name, s in r["progress"].items()
+            )
+            print(f"       timeline: {progress}")
+            print(f"       validate={r['validation_status']:<12} "
+                  f"apply={r['application_status']:<12} "
+                  f"files={len(r['changed_files'])}")
+
+    summary = build_organization_summary(result, org_service=orch.get_organization_graph())
+    if summary.get("repository_count", 0) > 0:
+        print(f"\n  {'='*56}\n  Organization Summary (Phase 20A6)\n  {'='*56}")
+        print(f"  Repositories: {summary['repository_count']} "
+              f"(successful {len(summary['successful_repositories'])}, "
+              f"failed {len(summary['failed_repositories'])}, "
+              f"repaired {len(summary['repaired_repositories'])})")
+        if summary.get("duration_seconds") is not None:
+            print(f"  Duration:     {summary['duration_seconds']:.2f}s")
+        dec = summary.get("engineering_decisions") or {}
+        con = summary.get("consensus_summary") or {}
+        print(f"  Decisions:    {dec.get('count', 0)}"
+              f"  Consensus: {con.get('count', 0)}"
+              f"  Contradictions: {con.get('contradictions', 0)}")
+        print(f"  Quality:      {summary.get('quality_status', '')}")
+        g = summary.get("graph")
+        if g:
+            print(f"  Org graph:    {g.get('node_count', 0)} nodes, "
+                  f"{g.get('edge_count', 0)} edges, "
+                  f"{g.get('cross_edge_count', 0)} cross-edges")
 
     if result.duration_seconds:
         print(f"\n  Duration: {result.duration_seconds:.2f}s")

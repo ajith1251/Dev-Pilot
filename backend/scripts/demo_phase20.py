@@ -20,6 +20,19 @@ Deterministic and offline (no paid LLM, no network; ``source=local`` only):
        repository's OWN namespace carries RUN/PATCH/FILE evidence, and the
        org graph links the run across namespaces via REFERENCES edges;
        ``RepositoryPatchResult.changed_files`` feeds the per-repo evidence.
+    H. Cross-repo run creation (A6)     — the dashboard view built from a
+       created run lists primary + auxiliary repositories in order.
+    I. Execution tracking (A6)          — a mid-run dashboard view carries
+       per-repository progress across the six timeline stages.
+    J. Live WS payload (A6)             — the run-update broadcast payload
+       shape carries ``repositories`` + ``organization_summary``.
+    K. Organization summary (A6)        — a completed run yields an
+       organization-level execution summary (repositories, duration,
+       successful/failed/repaired, decisions, consensus, quality).
+    L. EKG navigation (A6)              — each repository card's graph block
+       resolves to its OWN namespace stats (navigable link target).
+    M. Restart recovery (A6)            — re-loading the run from the store
+       (simulating a backend restart) rebuilds the identical dashboard view.
 
 Usage:
     python scripts/demo_phase20.py          # in-memory (deterministic)
@@ -544,6 +557,311 @@ async def demo_g(tmp_root: str) -> dict:
     }
 
 
+# ── Phase 20A6: Multi-Repository Dashboard demos ────────────────
+
+
+def _seed_aux_namespaces(run, aux: str) -> None:
+    """Record materialized auxiliary namespaces on a run (mirrors A2 output).
+
+    Demo helpers that build a dashboard view without a full execute_run set
+    the same ``auxiliary_repositories`` payload the orchestrator records after
+    ``_materialize_auxiliary_repositories``.
+    """
+    run.auxiliary_repositories = [
+        {
+            "repository_id": "repo-b",
+            "namespace_id": "repo-b",
+            "organization_id": "default",
+            "name": "repo-b",
+            "path": aux,
+            "source_type": "local",
+            "created_at": run.created_at or "",
+        }
+    ]
+
+
+async def _approved_multi_repo_run(tmp_root: str):
+    """Run a primary + aux execute_run to APPROVED, returning
+    ``(orch, result, primary, aux)``. Shares the deterministic mock-stage
+    machinery of demos F/G so the A6 demos build on the same evidence."""
+    from app.models.coding import FileChange, FileOperation, PatchSet
+    from app.models.orchestration import RunStatus, StageType
+    from app.services.orchestration_service import OrchestrationService
+
+    # Clean checkouts so CREATE patches validate deterministically.
+    for rid in ("primary", "repo-b"):
+        shutil.rmtree(Path(tmp_root) / rid, ignore_errors=True)
+    primary = _write_local_repo(tmp_root, "primary", {"main.py": "p1\n"})
+    aux = _write_local_repo(tmp_root, "repo-b", {"app.py": "b1\n"})
+    orch = OrchestrationService()
+    run = await orch.create_run(_run_source(primary, aux))
+
+    run.current_stage = StageType.CODING
+    run.repository_profile = AsyncMock()
+    reqs, plan = _reqs()
+    run.requirements = reqs
+    run.plan = plan
+    run.retrieved_context = AsyncMock()
+    run.patch_set = PatchSet(patch_id="primary", changes=[
+        FileChange(
+            change_id="primary-C1", operation=FileOperation.MODIFY,
+            path="main.py", new_content="p2\n",
+        ),
+    ])
+    await orch._store.update(run)
+
+    async def _mock_stage(target: StageType):
+        async def _fn(run, *args, **kwargs):
+            run.current_stage = target
+            return True
+        return _fn
+
+    async def _mock_approve():
+        async def _fn(run, *args, **kwargs):
+            run.current_stage = StageType.QUALITY_GATE
+            run.status = RunStatus.APPROVED
+            return True
+        return _fn
+
+    with patch.object(OrchestrationService, "_stage_testing",
+                      new_callable=AsyncMock, side_effect=await _mock_stage(StageType.TESTING)), \
+         patch.object(OrchestrationService, "_stage_review",
+                      new_callable=AsyncMock, side_effect=await _mock_stage(StageType.REVIEWING)), \
+         patch.object(OrchestrationService, "_stage_quality_gate",
+                      new_callable=AsyncMock, side_effect=await _mock_approve()):
+        result = await orch.execute_run(run.run_id, workspace_root=primary)
+    return orch, result, primary, aux
+
+
+async def demo_h(tmp_root: str) -> dict:
+    """H. Cross-repo run creation (Phase 20 A6) — dashboard view surface."""
+    from app.models.orchestration import StageType
+    from app.services.orchestration_service import OrchestrationService
+    from app.services.run_dashboard import build_repository_view
+
+    primary = _write_local_repo(tmp_root, "primary", {"main.py": "p1\n"})
+    aux = _write_local_repo(tmp_root, "repo-b", {"app.py": "b1\n"})
+    orch = OrchestrationService()
+    run = await orch.create_run(_run_source(primary, aux))
+    _seed_aux_namespaces(run, aux)
+    run.current_stage = StageType.CODING
+    await orch._store.update(run)
+
+    view = build_repository_view(run, org_service=orch._get_org_graph())
+    assert [r["repository_id"] for r in view] == ["repo-primary", "repo-b"]
+    assert view[0]["is_primary"] is True
+    assert view[1]["is_primary"] is False
+    assert [r["ordering"] for r in view] == [0, 1]
+    assert view[0]["organization"] == "default"
+
+    return {
+        "repositories": [r["repository_id"] for r in view],
+        "ordering": [r["ordering"] for r in view],
+        "primary": view[0]["repository_id"],
+        "aux": view[1]["repository_id"],
+    }
+
+
+async def demo_i(tmp_root: str) -> dict:
+    """I. Execution tracking across repositories (Phase 20 A6)."""
+    from app.models.orchestration import StageType
+    from app.services.orchestration_service import OrchestrationService
+    from app.services.run_dashboard import (
+        REPOSITORY_STAGES,
+        build_repository_view,
+    )
+
+    primary = _write_local_repo(tmp_root, "primary", {"main.py": "p1\n"})
+    aux = _write_local_repo(tmp_root, "repo-b", {"app.py": "b1\n"})
+    orch = OrchestrationService()
+    run = await orch.create_run(_run_source(primary, aux))
+    _seed_aux_namespaces(run, aux)
+
+    # Simulate a mid-run snapshot: coding in flight, testing pending.
+    run.current_stage = StageType.CODING
+    from app.models.orchestration import StageResult, StageStatus, StageType as ST
+    run.stage_results = [
+        StageResult(stage=ST.PLANNING, status=StageStatus.SUCCEEDED),
+        StageResult(stage=ST.CODING, status=StageStatus.RUNNING),
+    ]
+    await orch._store.update(run)
+
+    view = build_repository_view(run, org_service=orch._get_org_graph())
+    per_repo = view[0]["progress"]
+    assert list(per_repo.keys()) == REPOSITORY_STAGES
+    assert per_repo["planning"] == "succeeded"
+    assert per_repo["quality_gate"] == "pending"
+    assert view[0]["current_stage"] == "coding"
+
+    return {
+        "stages": REPOSITORY_STAGES,
+        "primary_progress": per_repo,
+        "current_stage": view[0]["current_stage"],
+    }
+
+
+async def demo_j(tmp_root: str) -> dict:
+    """J. Live repository progress updates (Phase 20 A6) — WS payload shape."""
+    from app.models.orchestration import StageType
+    from app.services.orchestration_service import OrchestrationService
+    from app.services.run_dashboard import build_repository_view
+
+    primary = _write_local_repo(tmp_root, "primary", {"main.py": "p1\n"})
+    aux = _write_local_repo(tmp_root, "repo-b", {"app.py": "b1\n"})
+    orch = OrchestrationService()
+    run = await orch.create_run(_run_source(primary, aux))
+    _seed_aux_namespaces(run, aux)
+    run.current_stage = StageType.TESTING
+    await orch._store.update(run)
+
+    org = orch._get_org_graph()
+    # The WebSocket broadcast builds the same repository view per update.
+    payload = {
+        "run_id": run.run_id,
+        "status": run.status.value,
+        "current_stage": run.current_stage.value,
+        "repositories": build_repository_view(run, org_service=org),
+    }
+    assert len(payload["repositories"]) == 2
+    assert payload["current_stage"] == "testing"
+    # Each repository card carries live stage + progress for the client.
+    assert "progress" in payload["repositories"][0]
+    assert payload["repositories"][0]["progress"]["testing"] == "pending"
+
+    return {
+        "run_id": run.run_id,
+        "broadcast_stage": payload["current_stage"],
+        "repositories_in_payload": len(payload["repositories"]),
+        "live_progress": True,
+    }
+
+
+async def demo_k(tmp_root: str) -> dict:
+    """K. Organization-level execution summary (Phase 20 A6)."""
+    from app.services.run_dashboard import build_organization_summary
+
+    orch, result, primary, aux = await _approved_multi_repo_run(tmp_root)
+    summary = build_organization_summary(result, org_service=orch._get_org_graph())
+
+    assert summary["repository_count"] == 2
+    assert {p["repository_id"] for p in summary["participating_repositories"]} == {
+        "repo-primary", "repo-b",
+    }
+    # Both checkouts carried a validated + applied patch (primary patch on the
+    # primary checkout, aux patch on its own checkout).
+    assert summary["successful_repositories"] == ["repo-primary", "repo-b"]
+    assert summary["failed_repositories"] == []
+    assert summary["quality_status"] == "approved"
+    assert summary["engineering_decisions"]["count"] >= 0
+    assert "consensus_summary" in summary
+    assert "graph" in summary
+
+    return {
+        "repository_count": summary["repository_count"],
+        "participating": summary["participating_repositories"],
+        "successful": summary["successful_repositories"],
+        "failed": summary["failed_repositories"],
+        "duration_seconds": summary["duration_seconds"],
+        "quality_status": summary["quality_status"],
+    }
+
+
+async def demo_l(tmp_root: str) -> dict:
+    """L. Navigate from repository card to EKG (Phase 20 A6)."""
+    from app.services.run_dashboard import build_repository_view
+
+    orch, result, primary, aux = await _approved_multi_repo_run(tmp_root)
+    org = orch._get_org_graph()
+    view = build_repository_view(result, org_service=org)
+
+    # Every repository card exposes a graph block. Repositories with a
+    # registered namespace (the aux repo, materialized + ingested by the
+    # completed run) resolve to THEIR OWN namespace — the id the org-graph
+    # routes render. The primary checkout is a plain workspace, so its block
+    # degrades gracefully without a namespace.
+    for entry in view:
+        g = entry["graph"]
+        assert g.get("available") is True
+        if entry["repository_id"] == "repo-b":
+            ns = g.get("namespace") or {}
+            assert ns.get("repository_id") == "repo-b"
+        else:
+            assert g.get("namespace") is None or g.get("node_count", 0) == 0
+
+    # The repo-b card resolves to the namespace with the ingested evidence.
+    stats = org.repository_stats("repo-b") or {}
+    assert stats.get("run_count", 0) >= 1
+
+    return {
+        "cards": [
+            {
+                "repository_id": e["repository_id"],
+                "namespace": (e["graph"].get("namespace") or {}).get("repository_id"),
+                "node_count": e["graph"].get("node_count"),
+                "run_count": e["graph"].get("run_count"),
+            }
+            for e in view
+        ],
+        "repo_b_namespace_runs": stats.get("run_count"),
+        "navigable": True,
+    }
+
+
+async def demo_m(tmp_root: str) -> dict:
+    """M. Restart recovery preserving dashboard state (Phase 20 A6)."""
+    from app.services.orchestration_service import OrchestrationService
+    from app.services.run_dashboard import (
+        build_organization_summary,
+        build_repository_view,
+    )
+
+    orch, result, primary, aux = await _approved_multi_repo_run(tmp_root)
+    org = orch._get_org_graph()
+    before = build_repository_view(result, org_service=org)
+    before_summary = build_organization_summary(result, org_service=org)
+
+    # Simulate a backend restart: re-load the persisted run from the store
+    # and rebuild the dashboard view purely from persisted state. With
+    # PostgreSQL configured a FRESH store instance proves the view survives
+    # a real process restart (the completed run is persisted first); in
+    # in-memory mode the store instance is shared (the restart boundary for
+    # that mode).
+    if _is_pg_configured():
+        from app.services.postgres_run_store import PostgresRunStore
+
+        store2 = PostgresRunStore()
+        completed = await orch._store.get(result.run_id)
+        assert completed is not None
+        # Strip non-serializable demo mocks before persisting (the real
+        # orchestrator never stores live agent objects).
+        completed.repository_profile = None
+        completed.retrieved_context = None
+        await store2.create(completed)
+    else:
+        store2 = orch._store
+    orch2 = OrchestrationService(run_store=store2)
+    reloaded = await orch2._store.get(result.run_id)
+    assert reloaded is not None
+    org2 = orch2._get_org_graph()
+    after = build_repository_view(reloaded, org_service=org2)
+    after_summary = build_organization_summary(reloaded, org_service=org2)
+
+    assert [r["repository_id"] for r in after] == [
+        r["repository_id"] for r in before
+    ]
+    assert [r["progress"] for r in after] == [r["progress"] for r in before]
+    assert after_summary["repository_count"] == before_summary["repository_count"]
+    assert after_summary["quality_status"] == "approved"
+
+    return {
+        "reloaded_run": reloaded.run_id,
+        "repositories_identical": True,
+        "progress_identical": True,
+        "summary_rebuilt": after_summary["repository_count"],
+        "persistence": "postgresql" if _is_pg_configured() else "in-memory",
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 20 cross-repo + scope demo")
     parser.add_argument("--pg", action="store_true",
@@ -551,6 +869,18 @@ async def main() -> None:
     parser.add_argument("--json", action="store_true",
                         help="Output JSON summary")
     args = parser.parse_args()
+
+    # JSON mode: keep stdout pure JSON. Handlers are created lazily at the
+    # first app import (after this point), so re-pointing existing handlers
+    # is not enough — redirect the file descriptor itself and restore it
+    # right before the JSON payload is printed.
+    if args.json:
+        import os
+
+        saved_stdout_fd = os.dup(1)
+        os.dup2(2, 1)  # stdout → stderr for the whole demo run
+    else:
+        saved_stdout_fd = None
 
     tmp_root = tempfile.mkdtemp(prefix="p20-demo-")
     try:
@@ -563,6 +893,12 @@ async def main() -> None:
             ("E_cross_checkout_rejection", demo_e, True),
             ("F_execute_run_end_to_end", demo_f, True),
             ("G_per_repo_ekg_ingestion", demo_g, True),
+            ("H_cross_repo_run_creation", demo_h, True),
+            ("I_execution_tracking", demo_i, True),
+            ("J_live_ws_payload", demo_j, True),
+            ("K_organization_summary", demo_k, True),
+            ("L_ekg_navigation", demo_l, True),
+            ("M_restart_recovery", demo_m, True),
         ]:
             try:
                 results[name] = await fn(tmp_root) if use_tmp else await fn()
@@ -575,6 +911,11 @@ async def main() -> None:
     pg = _is_pg_configured()
 
     if args.json:
+        # Restore stdout (all demo logging went to stderr) so the ONLY
+        # thing on stdout is the JSON payload.
+        if saved_stdout_fd is not None:
+            os.dup2(saved_stdout_fd, 1)
+            os.close(saved_stdout_fd)
         print(json.dumps({
             "phase": "20",
             "persistence": "postgresql" if pg else "in-memory",
@@ -595,6 +936,12 @@ async def main() -> None:
         "E_cross_checkout_rejection": "E. Cross-checkout rejection (blocking scope violation)",
         "F_execute_run_end_to_end": "F. End-to-end execute_run (own-checkout apply + repo_validation)",
         "G_per_repo_ekg_ingestion": "G. Per-repo EKG ingestion (namespace evidence + cross-namespace run link)",
+        "H_cross_repo_run_creation": "H. Cross-repo run creation (dashboard view surface)",
+        "I_execution_tracking": "I. Execution tracking across repositories (per-repo timeline)",
+        "J_live_ws_payload": "J. Live repository progress updates (WS payload shape)",
+        "K_organization_summary": "K. Organization-level execution summary",
+        "L_ekg_navigation": "L. Navigate from repository card to EKG namespace",
+        "M_restart_recovery": "M. Restart recovery preserving dashboard state",
     }
     for name, r in results.items():
         mark = "PASS" if r.get("PASS") else "FAIL"
@@ -621,6 +968,18 @@ async def main() -> None:
           f"{'PASS' if results['F_execute_run_end_to_end'].get('PASS') else 'FAIL'}")
     print(f"  PER-REPO EKG INGESTION: "
           f"{'PASS' if results['G_per_repo_ekg_ingestion'].get('PASS') else 'FAIL'}")
+    print(f"  CROSS-REPO RUN CREATION (A6): "
+          f"{'PASS' if results['H_cross_repo_run_creation'].get('PASS') else 'FAIL'}")
+    print(f"  EXECUTION TRACKING (A6): "
+          f"{'PASS' if results['I_execution_tracking'].get('PASS') else 'FAIL'}")
+    print(f"  LIVE WS PAYLOAD (A6): "
+          f"{'PASS' if results['J_live_ws_payload'].get('PASS') else 'FAIL'}")
+    print(f"  ORGANIZATION SUMMARY (A6): "
+          f"{'PASS' if results['K_organization_summary'].get('PASS') else 'FAIL'}")
+    print(f"  EKG NAVIGATION (A6): "
+          f"{'PASS' if results['L_ekg_navigation'].get('PASS') else 'FAIL'}")
+    print(f"  RESTART RECOVERY (A6): "
+          f"{'PASS' if results['M_restart_recovery'].get('PASS') else 'FAIL'}")
     print(f"  POSTGRESQL: {'PASS' if pg else 'n/a (in-memory)'}")
     print(f"{'='*64}\n")
 

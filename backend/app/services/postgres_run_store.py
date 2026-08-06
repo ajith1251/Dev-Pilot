@@ -63,6 +63,10 @@ class RunNotFoundError(Exception):
 # Context fields serialized into context_json (not separate columns).
 # Plain-string fields are excluded: they are either columns (e.g.
 # source_repository_path) or reconstructed from the source on re-hydration.
+#
+# Phase 20A6: the multi-repository dashboard state (repository_path,
+# auxiliary_repositories, repo_patches) is ALSO round-tripped so a backend
+# restart can rebuild the repository-aware run-detail view identically.
 _CONTEXT_FIELDS = (
     "repository_profile",
     "requirements",
@@ -74,7 +78,42 @@ _CONTEXT_FIELDS = (
     "repair_result",
     "review_report",
     "quality_gate_result",
+    "repository_path",
+    "auxiliary_repositories",
+    "repo_patches",
 )
+
+
+def _serialize_context_value(value: Any) -> Any:
+    """Serialize one context value into a JSON-safe payload.
+
+    Pydantic models dump via ``model_dump``; plain JSON-safe values (strings,
+    lists of dicts, etc.) pass through unchanged. Non-serializable content
+    returns None so the caller can skip it and keep the run durable.
+    """
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json")
+        except Exception:
+            return None
+    if isinstance(value, (list, tuple)):
+        out: List[Any] = []
+        for item in value:
+            item_dump = getattr(item, "model_dump", None)
+            if callable(item_dump):
+                try:
+                    out.append(item_dump(mode="json"))
+                except Exception:
+                    return None
+            else:
+                out.append(item)
+        return out
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return None
+    return value
 
 
 def _serialize_context(run: "DevPilotRun") -> Optional[Dict[str, Any]]:
@@ -89,12 +128,10 @@ def _serialize_context(run: "DevPilotRun") -> Optional[Dict[str, Any]]:
         value = getattr(run, field, None)
         if value is None:
             continue
-        dump = getattr(value, "model_dump", None)
-        if callable(dump):
-            try:
-                payload[field] = dump(mode="json")
-            except Exception:
-                continue  # non-serializable content — skip, keep the run durable
+        serialized = _serialize_context_value(value)
+        if serialized is None:
+            continue  # non-serializable content — skip, keep the run durable
+        payload[field] = serialized
     return payload or None
 
 
@@ -104,6 +141,7 @@ def _deserialize_context(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {}
     from app.models.coding import PatchApplicationResult, PatchSet
     from app.models.issues import ImplementationPlan, StructuredRequirements
+    from app.models.orchestration import RepositoryPatchResult
     from app.models.profile import RepositoryProfile
     from app.models.rag import RetrievedContext
     from app.models.repair import RepairResult
@@ -131,6 +169,18 @@ def _deserialize_context(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             restored[field] = model.model_validate(raw)
         except Exception:
             continue  # schema drift — skip rather than crash re-hydration
+
+    # Phase 20A6 — plain / list-of-model dashboard state.
+    if "repository_path" in data:
+        restored["repository_path"] = data["repository_path"]
+    if "auxiliary_repositories" in data:
+        restored["auxiliary_repositories"] = data["auxiliary_repositories"]
+    if "repo_patches" in data and isinstance(data["repo_patches"], list):
+        restored["repo_patches"] = [
+            RepositoryPatchResult.model_validate(raw)
+            for raw in data["repo_patches"]
+            if isinstance(raw, dict)
+        ]
     return restored
 
 

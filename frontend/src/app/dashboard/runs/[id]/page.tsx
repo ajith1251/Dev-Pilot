@@ -5,12 +5,19 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { runsApi } from "@/lib/api/client";
 import { useRunWebSocket } from "@/lib/hooks/useRunWebSocket";
+import RepositoryStatusCards from "@/components/runs/RepositoryStatusCards";
+import RepositoryTimeline from "@/components/runs/RepositoryTimeline";
+import OrganizationSummary from "@/components/runs/OrganizationSummary";
+import RunHistoryPanel from "@/components/runs/RunHistoryPanel";
+import { isValidRepository } from "@/lib/graph/repositoryStatusModel";
 import type {
   RunStatus,
   StageType,
   StageResult,
   RunEvent,
   RepositoryPatchValidation,
+  RepositoryStatus,
+  OrganizationSummary as OrganizationSummaryType,
 } from "@/lib/api/client";
 
 // Reusable failure type matching the API client's RunDetail
@@ -493,6 +500,8 @@ function normalizeRunData(data: {
     title?: string;
     description?: string;
     repository_path?: string | null;
+    acceptance_criteria?: string[];
+    execution_budget?: Record<string, unknown>;
   };
   current_stage: string;
   created_at: string;
@@ -504,7 +513,9 @@ function normalizeRunData(data: {
   total_duration_ms?: number | null;
   cancellation_requested?: boolean;
   auxiliary_repositories?: Array<Record<string, unknown>>;
-  repo_validation?: RepositoryPatchValidation[];
+  repo_validation?: Array<Record<string, unknown>>;
+  repositories?: Array<Record<string, unknown>>;
+  organization_summary?: Record<string, unknown> | null;
 }): {
   run_id: string;
   status: RunStatus;
@@ -513,6 +524,8 @@ function normalizeRunData(data: {
     title: string;
     description: string;
     repository_path: string | null;
+    acceptance_criteria: string[];
+    execution_budget: Record<string, unknown>;
   };
   current_stage: string;
   created_at: string;
@@ -525,6 +538,8 @@ function normalizeRunData(data: {
   cancellation_requested: boolean;
   auxiliary_repositories: Array<Record<string, unknown>>;
   repo_validation: RepositoryPatchValidation[];
+  repositories: RepositoryStatus[];
+  organization_summary: OrganizationSummaryType | null;
 } {
   return {
     run_id: data.run_id,
@@ -534,6 +549,8 @@ function normalizeRunData(data: {
       title: data.source?.title || "",
       description: data.source?.description || "",
       repository_path: data.source?.repository_path || null,
+      acceptance_criteria: data.source?.acceptance_criteria || [],
+      execution_budget: data.source?.execution_budget || {},
     },
     current_stage: data.current_stage,
     created_at: data.created_at,
@@ -545,7 +562,12 @@ function normalizeRunData(data: {
     total_duration_ms: data.total_duration_ms || null,
     cancellation_requested: data.cancellation_requested || false,
     auxiliary_repositories: data.auxiliary_repositories || [],
-    repo_validation: data.repo_validation || [],
+    repo_validation: (data.repo_validation || ([] as unknown[])).filter(
+      (rv): rv is RepositoryPatchValidation =>
+        !!rv && typeof (rv as { repository_id?: unknown }).repository_id === "string"
+    ),
+    repositories: (data.repositories || ([] as unknown[])).filter(isValidRepository),
+    organization_summary: (data.organization_summary as OrganizationSummaryType | null) || null,
   };
 }
 
@@ -565,6 +587,8 @@ export default function RunDetailPage() {
       description?: string;
       repository_path?: string | null;
       issue_number?: number | null;
+      acceptance_criteria?: string[];
+      execution_budget?: Record<string, unknown>;
     };
     current_stage: string;
     created_at: string;
@@ -577,6 +601,8 @@ export default function RunDetailPage() {
     cancellation_requested: boolean;
     auxiliary_repositories?: Array<Record<string, unknown>>;
     repo_validation?: RepositoryPatchValidation[];
+    repositories?: RepositoryStatus[];
+    organization_summary?: OrganizationSummaryType | null;
   }
 
   const [run, setRun] = useState<RunData | null>(null);
@@ -751,6 +777,11 @@ export default function RunDetailPage() {
         failure={run.failure}
       />
 
+      {/* Phase 20A6: Repository Status Cards (live via WebSocket) */}
+      {(run.repositories?.length ?? 0) > 0 && (
+        <RepositoryStatusCards repositories={run.repositories || []} runId={run.run_id} />
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
@@ -773,6 +804,11 @@ export default function RunDetailPage() {
 
       {/* Warnings */}
       <WarningList warnings={run.warnings} />
+
+      {/* Phase 20A6: Cross-Repository Execution Timeline */}
+      {(run.repositories?.length ?? 0) > 0 && (
+        <RepositoryTimeline repositories={run.repositories || []} />
+      )}
 
       {/* Main content: Timeline + Events */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -810,6 +846,24 @@ export default function RunDetailPage() {
                 <div>
                   <span className="text-slate-500 dark:text-slate-400">Issue: </span>
                   <span className="text-slate-900 dark:text-white">#{run.source.issue_number}</span>
+                </div>
+              )}
+              {(run.source?.acceptance_criteria?.length ?? 0) > 0 && (
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400">Acceptance Criteria: </span>
+                  <ul className="mt-1 space-y-0.5">
+                    {run.source.acceptance_criteria!.map((c, i) => (
+                      <li key={i} className="text-slate-900 dark:text-white text-[11px]">• {c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {Object.keys(run.source?.execution_budget || {}).length > 0 && (
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400">Execution Budget: </span>
+                  <span className="text-slate-900 dark:text-white">
+                    {Object.entries(run.source!.execution_budget!).map(([k, v]) => `${k}=${String(v)}`).join(", ")}
+                  </span>
                 </div>
               )}
               {(run.auxiliary_repositories?.length ?? 0) > 0 && (
@@ -899,6 +953,15 @@ export default function RunDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Phase 20A6: Organization Summary (run completion) */}
+      <OrganizationSummary summary={run.organization_summary || null} />
+
+      {/* Phase 20A6: Context & Run History */}
+      <RunHistoryPanel
+        runId={run.run_id}
+        decisions={run.organization_summary?.engineering_decisions}
+      />
     </div>
   );
 }

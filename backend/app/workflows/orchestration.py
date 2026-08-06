@@ -69,6 +69,8 @@ class OrchestrationWorkflow:
         workspace_root: Optional[str] = None,
         repositories: Optional[List["RepositorySpec"]] = None,
         repo_patches: Optional[List["RepositoryPatchInput"]] = None,
+        acceptance_criteria: Optional[List[str]] = None,
+        execution_budget: Optional[Dict[str, Any]] = None,
     ) -> DevPilotRunResult:
         """Run end-to-end pipeline from a user task.
 
@@ -77,6 +79,9 @@ class OrchestrationWorkflow:
         ``repo_patches`` optionally seeds per-repository patches that are
         validated + applied against each repository's OWN checkout only
         (Phase 20A4).
+        ``acceptance_criteria`` / ``execution_budget`` are advisory run
+        metadata recorded on the source and surfaced on the dashboard
+        (Phase 20A6).
         """
         source = RunSource(
             source_type=RunSourceType.USER_TASK,
@@ -85,6 +90,8 @@ class OrchestrationWorkflow:
             repository_path=repository_path,
             repositories=repositories,
             repo_patches=repo_patches,
+            acceptance_criteria=list(acceptance_criteria or []),
+            execution_budget=dict(execution_budget or {}),
         )
         run = await self._orchestrator.create_run(source)
         logger.info("Created run %s: %s", run.run_id, title[:100])
@@ -101,6 +108,8 @@ class OrchestrationWorkflow:
         description: str = "",
         repositories: Optional[List["RepositorySpec"]] = None,
         repo_patches: Optional[List["RepositoryPatchInput"]] = None,
+        acceptance_criteria: Optional[List[str]] = None,
+        execution_budget: Optional[Dict[str, Any]] = None,
     ) -> DevPilotRunResult:
         """Run end-to-end pipeline from a GitHub issue.
 
@@ -109,6 +118,9 @@ class OrchestrationWorkflow:
         ``repo_patches`` optionally seeds per-repository patches that are
         validated + applied against each repository's OWN checkout only
         (Phase 20A4).
+        ``acceptance_criteria`` / ``execution_budget`` are advisory run
+        metadata recorded on the source and surfaced on the dashboard
+        (Phase 20A6).
         """
         source = RunSource(
             source_type=RunSourceType.GITHUB_ISSUE,
@@ -118,6 +130,8 @@ class OrchestrationWorkflow:
             repositories=repositories,
             issue_number=issue_number,
             repo_patches=repo_patches,
+            acceptance_criteria=list(acceptance_criteria or []),
+            execution_budget=dict(execution_budget or {}),
         )
         run = await self._orchestrator.create_run(source)
         logger.info("Created run %s: %s #%d", run.run_id, repo_url, issue_number)
@@ -127,6 +141,15 @@ class OrchestrationWorkflow:
 
     async def get_run(self, run_id: str) -> Optional[DevPilotRun]:
         return await self._orchestrator.get_run(run_id)
+
+    def organization_graph(self) -> Any:
+        """Return the shared OrganizationKnowledgeGraphService (Phase 20A6).
+
+        Same instance the orchestrator uses to materialize auxiliary
+        repositories, so repository-aware dashboard views see the run's
+        namespaces and per-repository EKG stats.
+        """
+        return self._orchestrator.get_organization_graph()
 
     async def list_runs(
         self,

@@ -75,6 +75,16 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                     detail=f"invalid repo_patches spec: {exc}",
                 ) from exc
 
+        # Phase 20A6: advisory run-creation metadata (acceptance criteria +
+        # execution budget) recorded on the source and surfaced on the
+        # dashboard. Non-list / non-dict values are rejected fast.
+        acceptance_criteria = body.get("acceptance_criteria")
+        if acceptance_criteria is not None and not isinstance(acceptance_criteria, list):
+            raise HTTPException(status_code=400, detail="acceptance_criteria must be a list of strings")
+        execution_budget = body.get("execution_budget")
+        if execution_budget is not None and not isinstance(execution_budget, dict):
+            raise HTTPException(status_code=400, detail="execution_budget must be an object")
+
         if source_type == "github_issue":
             issue_number = body.get("issue_number")
             if not issue_number:
@@ -86,6 +96,8 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 description=description,
                 repositories=repositories,
                 repo_patches=repo_patches,
+                acceptance_criteria=acceptance_criteria,
+                execution_budget=execution_budget,
             )
         else:
             result = await workflow.run_user_task(
@@ -95,9 +107,11 @@ async def create_run(body: Dict[str, Any]) -> Dict[str, Any]:
                 workspace_root=body.get("workspace_root"),
                 repositories=repositories,
                 repo_patches=repo_patches,
+                acceptance_criteria=acceptance_criteria,
+                execution_budget=execution_budget,
             )
 
-        return {"success": True, "data": _sanitize_result(result)}
+        return {"success": True, "data": _sanitize_result(result, org_service=workflow.organization_graph())}
 
     except HTTPException:
         raise
@@ -147,6 +161,9 @@ async def list_runs(
                     "current_stage": r.current_stage.value,
                     "created_at": r.created_at,
                     "total_duration_ms": r.total_duration_ms,
+                    # Phase 20A6: participating repository count so the run
+                    # list can badge multi-repository runs.
+                    "repository_count": 1 + len(r.auxiliary_repositories or []),
                 }
                 for r in runs
             ],
@@ -165,7 +182,7 @@ async def get_run(run_id: str) -> Dict[str, Any]:
         run = await workflow.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-        return {"success": True, "data": _sanitize_run(run)}
+        return {"success": True, "data": _sanitize_run(run, org_service=workflow.organization_graph())}
     except HTTPException:
         raise
     except Exception as exc:
@@ -251,8 +268,13 @@ async def check_recovery() -> Dict[str, Any]:
 # ── Sanitizers ──────────────────────────────────────────────────
 
 
-def _sanitize_run(run: Any) -> Dict[str, Any]:
+def _sanitize_run(run: Any, org_service: Any = None) -> Dict[str, Any]:
     """Sanitize a DevPilotRun for API response."""
+    from app.services.run_dashboard import (
+        build_organization_summary,
+        build_repository_view,
+    )
+
     return {
         "run_id": run.run_id,
         "status": run.status.value,
@@ -262,6 +284,10 @@ def _sanitize_run(run: Any) -> Dict[str, Any]:
             "description": run.source.description[:500] if run.source.description else "",
             "repository_path": run.source.repository_path,
             "issue_number": run.source.issue_number,
+            # Phase 20A6: acceptance criteria + execution budgets (advisory
+            # metadata the run was created with).
+            "acceptance_criteria": getattr(run.source, "acceptance_criteria", None) or [],
+            "execution_budget": getattr(run.source, "execution_budget", None) or {},
         },
         "current_stage": run.current_stage.value,
         "created_at": run.created_at,
@@ -288,11 +314,19 @@ def _sanitize_run(run: Any) -> Dict[str, Any]:
         "cancellation_requested": run.cancellation_requested,
         "auxiliary_repositories": run.auxiliary_repositories,
         "repo_validation": [r.summary() for r in run.repo_patches],
+        # Phase 20A6: repository-aware dashboard surface.
+        "repositories": build_repository_view(run, org_service=org_service),
+        "organization_summary": build_organization_summary(run, org_service=org_service),
     }
 
 
-def _sanitize_result(result: Any) -> Dict[str, Any]:
+def _sanitize_result(result: Any, org_service: Any = None) -> Dict[str, Any]:
     """Sanitize a DevPilotRunResult for API response."""
+    from app.services.run_dashboard import (
+        build_organization_summary,
+        build_repository_view,
+    )
+
     return {
         "run_id": result.run_id,
         "status": result.status.value,
@@ -306,6 +340,9 @@ def _sanitize_result(result: Any) -> Dict[str, Any]:
         "events": result.events[:50],
         # Phase 20A4: per-repository validation/application outcomes.
         "repo_validation": [r.summary() for r in result.repo_validation],
+        # Phase 20A6: repository-aware dashboard surface.
+        "repositories": build_repository_view(result, org_service=org_service),
+        "organization_summary": build_organization_summary(result, org_service=org_service),
         "failure": {
             "stage": result.failure.stage.value,
             "code": result.failure.code.value,

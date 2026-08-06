@@ -32,6 +32,119 @@ export interface RunSource {
   repository_path?: string;
   issue_number?: number;
   issue_url?: string;
+  acceptance_criteria?: string[];
+  execution_budget?: Record<string, unknown>;
+}
+
+// ── Phase 20A6: repository-aware dashboard types ───────────────
+
+/** Per-repository status card (derived server-side from run + org graph). */
+export interface RepositoryStatus {
+  repository_id: string;
+  name: string;
+  namespace: string;
+  organization: string;
+  path: string;
+  source_type: string;
+  is_primary: boolean;
+  ordering: number;
+  current_stage: string;
+  progress: {
+    planning: string;
+    coding: string;
+    testing: string;
+    repair: string;
+    review: string;
+    quality_gate: string;
+  };
+  validation_status: string;
+  application_status: string;
+  changed_files: string[];
+  validation_errors: string[];
+  quality_gate: string;
+  quality_gate_result: string;
+  graph: {
+    available: boolean;
+    node_count?: number;
+    edge_count?: number;
+    run_count?: number;
+    namespace?: {
+      repository_id: string;
+      organization_id: string;
+      name: string;
+      source_type: string;
+    } | null;
+    outgoing_links?: Array<{ repository_id: string; relationship: string }>;
+    incoming_links?: Array<{ repository_id: string; relationship: string }>;
+  };
+}
+
+/** Organization-level execution summary (run completion). */
+export interface OrganizationSummary {
+  repository_count: number;
+  participating_repositories: Array<{
+    repository_id: string;
+    name: string;
+    is_primary: boolean;
+    status: string;
+  }>;
+  successful_repositories: string[];
+  failed_repositories: string[];
+  repaired_repositories: string[];
+  duration_seconds?: number | null;
+  engineering_decisions: {
+    count: number;
+    recent: string[];
+  };
+  consensus_summary: {
+    count: number;
+    contradictions: number;
+    recent: string[];
+  };
+  quality_status: string;
+  quality_gate?: {
+    decision?: string | null;
+    score?: number | null;
+    requirements_satisfied: number;
+    requirements_unsatisfied: number;
+    verification_status: string;
+  } | null;
+  graph?: {
+    repository_count: number;
+    node_count: number;
+    edge_count: number;
+    cross_edge_count: number;
+    version: number;
+  } | null;
+}
+
+/** Registered organization repository namespace (org graph). */
+export interface OrgRepository {
+  repository_id: string;
+  namespace_id: string;
+  organization_id: string;
+  name: string;
+  path: string;
+  source_type: string;
+  created_at: string;
+}
+
+/** Per-repository EKG stats + dependency links. */
+export interface OrgRepositoryStats {
+  repository_id: string;
+  namespace: {
+    repository_id: string;
+    organization_id: string;
+    name: string;
+    path: string;
+    source_type: string;
+  } | null;
+  node_count: number;
+  edge_count: number;
+  run_count: number;
+  node_types: Record<string, number>;
+  outgoing_links: Array<{ repository_id: string; relationship: string }>;
+  incoming_links: Array<{ repository_id: string; relationship: string }>;
 }
 
 /** Auxiliary repository spec for a Phase 20 multi-repo run (mirrors backend
@@ -96,6 +209,7 @@ export interface RunSummary {
   current_stage: string;
   created_at: string;
   total_duration_ms?: number | null;
+  repository_count?: number;
 }
 
 export interface RunDetail {
@@ -117,6 +231,8 @@ export interface RunDetail {
   cancellation_requested: boolean;
   auxiliary_repositories?: Array<Record<string, unknown>>;
   repo_validation?: RepositoryPatchValidation[];
+  repositories?: RepositoryStatus[];
+  organization_summary?: OrganizationSummary;
 }
 
 export interface RunResult {
@@ -133,6 +249,8 @@ export interface RunResult {
   duration_seconds?: number | null;
   auxiliary_repositories?: Array<Record<string, unknown>>;
   repo_validation?: RepositoryPatchValidation[];
+  repositories?: RepositoryStatus[];
+  organization_summary?: OrganizationSummary;
 }
 
 export interface RunListStats {
@@ -363,6 +481,8 @@ export const runsApi = {
     issue_number?: number;
     workspace_root?: string;
     repositories?: AuxiliaryRepositorySpec[];
+    acceptance_criteria?: string[];
+    execution_budget?: Record<string, unknown>;
   }): Promise<{ success: boolean; data: RunResult }> {
     return request("/api/v1/runs", {
       method: "POST",
@@ -472,6 +592,50 @@ export const providersApi = {
       method: "POST",
       body: JSON.stringify(message ? { message } : {}),
     });
+  },
+};
+
+// ── Organization Graph API (Phase 19A / 20A6) ────────────────
+
+export const orgApi = {
+  /** List registered repository namespaces with search + pagination.
+   *  Powers the Phase 20A6 repository selector. */
+  async repositories(params?: {
+    q?: string;
+    organization_id?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    success: boolean;
+    data: {
+      repositories: OrgRepository[];
+      count: number;
+      total: number;
+      limit: number;
+      offset: number;
+    };
+  }> {
+    const query = new URLSearchParams();
+    if (params?.q) query.set("q", params.q);
+    if (params?.organization_id) query.set("organization_id", params.organization_id);
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    const qs = query.toString();
+    return request(`/api/v1/graph/org/repositories${qs ? `?${qs}` : ""}`);
+  },
+
+  /** Per-repository EKG stats + dependency links (repo status cards). */
+  async repository(
+    repositoryId: string
+  ): Promise<{ success: boolean; data: OrgRepositoryStats }> {
+    return request(
+      `/api/v1/graph/org/repositories/${encodeURIComponent(repositoryId)}`
+    );
+  },
+
+  /** Organization-wide graph statistics. */
+  async stats(): Promise<{ success: boolean; data: Record<string, unknown> }> {
+    return request("/api/v1/graph/org/stats");
   },
 };
 

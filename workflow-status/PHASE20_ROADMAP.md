@@ -1,6 +1,6 @@
 # Phase 20 Roadmap — Cross-Repository Autonomous Engineering & Production Readiness
 
-> **Status**: COMPLETE — A1–A6 DONE (Sessions 28–33), Phase 20B DONE (Sessions 34/35/37),
+> **Status**: COMPLETE — A1–A6 DONE (Sessions 28–33 + 40), Phase 20B DONE (Sessions 34/35/37),
 > workstream E DONE (Session 38)
 > **Date**: August 5, 2026
 > **Basis**: Phase 19C is fully complete (`5cc371a` + `1644fb3` + `2cc929b`). The
@@ -107,28 +107,69 @@ Close the execution gap on top of the org graph.
   (per-repo ingest evidence) added, demos A–G ALL PASS.
 - **A6. API/CLI/frontend** — `POST /api/v1/runs` + `python -m app.cli run`
   accept `repositories`; dashboard run form exposes optional aux repos.
-  **✅ DONE (Session 33):** API run-detail surface — `_sanitize_run`
-  (`backend/app/api/v1/orchestration.py`) now exposes `auxiliary_repositories`
-  (raw spec list) + `repo_validation` (per-repo `RepositoryPatchResult.summary()`
-  list, incl. `changed_files`) on `GET /api/v1/runs/{id}` (the create-side
-  `repositories` field + CLI `--aux-repo` were already wired in A1/A2).
-  Frontend: `AuxiliaryRepositorySpec` + `RepositoryPatchValidation` types in
-  `frontend/src/lib/api/client.ts`, `runsApi.create` accepts optional
-  `repositories`; `CreateRunModal` (`frontend/src/app/dashboard/runs/page.tsx`)
-  gained an aux-repo editor (dynamic add/remove, local path OR
-  github owner/repo/ref, invalid rows dropped client-side, submitted as
-  `repositories`); run-detail page (`dashboard/runs/[id]/page.tsx`) renders the
-  aux repos in the Source card + a "Repository Validation" card
-  (status/changes/changed_files/errors). Tests: 2 new backend tests
-  (`TestRunDetailApiSurface` in `tests/test_phase20_repo_ingestion.py`, 15 total
-  in that file) + new `frontend/src/lib/api/client.test.ts` (2 tests); frontend
-  vitest 39/39, `next build` EXIT=0. Also hardened the TTL-boundary flake:
-  `test_exhausted_marker_expires_after_ttl` simulated exactly
-  `marked_at + ttl` but the provider prunes with `now - ts >= ttl`, so float
-  rounding could flip the `>=`; now uses `marked_at + 3601.0` (same hardening
-  previously applied to `test_chat_recovers_preferred_model_after_ttl`). Full
-  suite **1655 passed / 18 skipped / 1 pre-existing env failure**;
-  `scripts/demo_phase20.py` demos A–G ALL PASS.
+  **✅ DONE (Sessions 33 + 40 — full multi-repo dashboard & autonomous run
+  experience):**
+
+  *Session 33 (run-detail surface):* `_sanitize_run`
+  (`backend/app/api/v1/orchestration.py`) exposes `auxiliary_repositories` +
+  `repo_validation` on `GET /api/v1/runs/{id}`; `AuxiliaryRepositorySpec` +
+  `RepositoryPatchValidation` frontend types, `runsApi.create` `repositories`;
+  `CreateRunModal` aux-repo editor; run-detail Source card + "Repository
+  Validation" card. Also hardened the TTL-boundary flake
+  (`test_exhausted_marker_expires_after_ttl` → `marked_at + 3601.0`).
+
+  *Session 40 (full dashboard experience):*
+  - **Backend view builder** — new `backend/app/services/run_dashboard.py`:
+    `build_repository_view(run, org_service)` (per-repo status cards: primary +
+    aux in materialized order, six-stage per-repo timeline progress
+    planning→coding→testing→repair→review→quality_gate, validation/application
+    status, changed files, per-repo EKG graph status from
+    `repository_stats`) and `build_organization_summary(run, org_service)`
+    (participating/successful/failed/repaired repositories, duration,
+    engineering decisions + consensus summary from events, quality status +
+    gate detail, org-graph stats). Duck-typed for both `DevPilotRun` and
+    `DevPilotRunResult` shapes; evidence-only, isolation-scoped to the run's
+    own namespaces.
+  - **API** — `_sanitize_run`/`_sanitize_result` include `repositories` +
+    `organization_summary`; `GET /api/v1/runs` list exposes `repository_count`;
+    `POST /api/v1/runs` accepts advisory `acceptance_criteria` (list) +
+    `execution_budget` (dict) recorded on `RunSource` (400 on malformed); org
+    `GET /api/v1/graph/org/repositories` gained `q`/`organization`/`limit`/
+    `offset` search+filter+pagination + new per-repo stats endpoint
+    `GET /api/v1/graph/org/repositories/{id}` (404 for unknown namespaces).
+  - **CLI** — `run` output adds Participating Repositories (per-repo
+    timeline icons, validation/apply/files) + Organization Summary blocks;
+    `--json` output is now PURE JSON (human-readable header/run-id suppressed)
+    with `repositories` + `organization_summary` merged; `graph
+    org-repositories` supports `--q/--organization/--limit/--offset`.
+  - **Frontend** — new `orgApi` client + `RepositorySelector` (search/filter,
+    lazy-load pagination, multi-select, dependency badges) in
+    `CreateRunModal` (which also gained acceptance-criteria + execution-budget
+    fields and aux-repo ordering + relationships editors); run-detail page
+    renders `RepositoryStatusCards` (live per-repo stage/progress/validation/
+    EKG status + navigation links into the org-graph/EKG views),
+    `RepositoryTimeline`, `OrganizationSummary`, `RunHistoryPanel`; run-list
+    shows multi-repo badges. WebSocket hook types carry the repository-aware
+    payload (`repositories` + `organization_summary` live updates). Pure
+    mappers in `frontend/src/lib/graph/repositoryStatusModel.ts`.
+  - **Restart recovery (spec demo F)** — `PostgresRunStore` now round-trips
+    `repository_path`, `auxiliary_repositories`, `repo_patches` via
+    `context_json` (list-of-model + plain-value serialization), so a
+    restarted backend rebuilds the identical repository-aware dashboard view.
+  - **Tests** — 25 new backend tests
+    (`tests/test_phase20a6_dashboard.py`: view builder both shapes, org
+    summary, API sanitize/create/list, org repositories search/filter/pagination
+    + per-repo stats, WS broadcast payload, CLI `--json`, PG A6 round-trip) +
+    14 new frontend vitest (11 `repositoryStatusModel` mappers + 3 client
+    additions) — frontend **63 passed (8 files)**, `next build` EXIT=0.
+  - **Demo** — `scripts/demo_phase20.py` demos A–M ALL PASS (H cross-repo run
+    creation, I execution tracking, J live WS payload, K org summary, L EKG
+    navigation, M restart recovery; PG persistence verified).
+  - **Docs** — `docs/ARCHITECTURE.md` §“Multi-Repository Dashboard”, this
+    roadmap, `PHASE20A6_COMPLETION_REPORT.md`.
+
+  Full suite **1681 passed / 17 skipped / 1 pre-existing env failure** (54
+  `integration`-marked deselected).
 
 ### B. Production Reliability (recommendation 3 follow-through)
 
@@ -228,7 +269,7 @@ Close the execution gap on top of the org graph.
 | 1 | **A1 + A2** (multi-repo run surface + acquisition) | smallest coherent vertical: create a run over 2 local repos, both acquired + linked — **✅ DONE (Session 28)** |
 | 2 | **A3 + A5** (cross-repo context + per-repo ingestion) | planner sees org evidence; evidence lands per-namespace — **A3 ✅ DONE (Session 29)**, **A5 ✅ DONE (Session 32)** |
 | 3 | **A4** (per-repo scope enforcement) | safety gate before any patch crosses checkouts — **✅ DONE (Session 31)** |
-| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — **✅ DONE (Session 33)**: dashboard run form + run-detail multi-repo surface |
+| 4 | **A6** (API/CLI/frontend surface) | surfaces the vertical for demo + tests — **✅ DONE (Sessions 33 + 40)**: full multi-repo dashboard (repository selector, per-repo execution timeline, status cards, organization summary, EKG navigation, run history, restart recovery) |
 | 5 | B/D/E | hardening + polish (**B1, B2, B3 ✅ DONE (Sessions 34/35/37)**; B2/B3 in `test_provider_router.py`, B1 paid tier in `test_llm_providers.py`; **D ✅ DONE (Session 36)**, **E ✅ DONE (Session 38)**) |
 
 ---
@@ -255,14 +296,17 @@ Close the execution gap on top of the org graph.
   **✅ A4 covered (21 tests in `tests/test_phase20_repo_scope.py`);**
   **✅ A5 covered (13 tests in `tests/test_phase20_repo_ingestion.py`).**
 - Full deterministic suite stays green (**1696 passed / 18 skipped / 1 pre-existing
-  env failure**).
-- `scripts/demo_phase20.py` demos A–G ALL PASS (deterministic, no paid LLM).
+  env failure**; Session 40 verification: **1681 passed / 17 skipped / 1 pre-existing
+  env failure** with `integration`-marked deselected, 0 regressions).
+- `scripts/demo_phase20.py` demos A–M ALL PASS (deterministic, no paid LLM; A6
+  demos H–M cover run creation, execution tracking, live WS payload, org
+  summary, EKG navigation, restart recovery).
 
 ---
 
 ## 6. Next
 
-**Phase 20 COMPLETE**: workstream A (multi-repo runs, Sessions 28–33), workstream B
+**Phase 20 COMPLETE**: workstream A (multi-repo runs, Sessions 28–33 + 40), workstream B
 (B1 paid Gemini tier — Session 37; B2 typed fallbacks — Session 34; B3 mid-stream
 token-loss failover — Session 35), workstream D (org-graph UI parity — Session 36)
 and workstream E (unittest XML / Vitest JSON / Jest JSON parsers — Session 38) are

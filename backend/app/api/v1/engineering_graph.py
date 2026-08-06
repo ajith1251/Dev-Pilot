@@ -303,15 +303,95 @@ async def org_graph_stats() -> Dict[str, Any]:
 
 
 @router.get("/org/repositories", response_model=Response)
-async def org_graph_repositories() -> Dict[str, Any]:
-    """List registered repository namespaces."""
+async def org_graph_repositories(
+    q: str = "",
+    organization_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List registered repository namespaces with search + pagination.
+
+    Phase 20A6 dashboard repository selector: ``q`` filters by name /
+    repository_id / path (case-insensitive substring); ``organization_id``
+    filters by namespace organization; ``limit``/``offset`` paginate so a
+    large org never loads every repository at once. Returns a bounded,
+    evidence-only payload (no credentials or hidden metadata).
+    """
     try:
         org = _get_org_service()
-        repos = [
-            ns.summary()
-            for ns in org.repositories()[:MAX_QUERY_RESULTS]
-        ]
-        return {"success": True, "data": {"repositories": repos}}
+        limit = min(max(limit, 1), MAX_QUERY_RESULTS)
+        offset = max(offset, 0)
+        query = q.strip().lower()
+        org_filter = (organization_id or "").strip().lower()
+        all_repos = org.repositories()
+        matched = []
+        for ns in all_repos:
+            summary = ns.summary()
+            if org_filter and summary.get("organization_id", "").lower() != org_filter:
+                continue
+            if query:
+                haystack = " ".join([
+                    summary.get("repository_id", ""),
+                    summary.get("name", ""),
+                    summary.get("path", ""),
+                ]).lower()
+                if query not in haystack:
+                    continue
+            matched.append(summary)
+        page = matched[offset:offset + limit]
+        return {
+            "success": True,
+            "data": {
+                "repositories": page,
+                "count": len(page),
+                "total": len(matched),
+                "limit": limit,
+                "offset": offset,
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/org/repositories/{repository_id}", response_model=Response)
+async def org_graph_repository_stats(repository_id: str) -> Dict[str, Any]:
+    """Per-repository EKG stats + dependency links (Phase 20A6).
+
+    Powers the repository status cards' Engineering Knowledge Graph panel:
+    node/edge/run counts scoped to the repository's own namespace, plus the
+    explicit cross-repository links (dependencies) in both directions.
+    Bounded + evidence-only; a namespace that is not registered returns 404.
+    """
+    try:
+        org = _get_org_service()
+        stats = org.repository_stats(repository_id)
+        if stats is None:
+            raise HTTPException(
+                status_code=404, detail=f"Repository {repository_id} not registered"
+            )
+        ns = stats.get("namespace")
+        namespace = {
+            "repository_id": getattr(ns, "repository_id", repository_id),
+            "organization_id": getattr(ns, "organization_id", "default"),
+            "name": getattr(ns, "name", ""),
+            "path": getattr(ns, "path", ""),
+            "source_type": getattr(ns, "source_type", "local"),
+        } if ns is not None else None
+        return {
+            "success": True,
+            "data": {
+                "repository_id": repository_id,
+                "namespace": namespace,
+                "node_count": stats.get("node_count", 0),
+                "edge_count": stats.get("edge_count", 0),
+                "run_count": stats.get("run_count", 0),
+                "node_types": stats.get("node_types", {}),
+                "outgoing_links": stats.get("outgoing_links", [])[:20],
+                "incoming_links": stats.get("incoming_links", [])[:20],
+            },
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

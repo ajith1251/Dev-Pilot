@@ -72,6 +72,12 @@ def add_cli_commands(parent_parser) -> None:
     os_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
     or_parser = graph_sub.add_parser("org-repositories", help="List registered namespaces")
+    or_parser.add_argument("--q", type=str, default="",
+                           help="Case-insensitive substring filter on id/name/path")
+    or_parser.add_argument("--organization", type=str, default="",
+                           help="Filter by organization_id")
+    or_parser.add_argument("--limit", type=int, default=50, help="Max rows (1..250)")
+    or_parser.add_argument("--offset", type=int, default=0, help="Pagination offset")
     or_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
     oc_parser = graph_sub.add_parser("org-cross-edges", help="List cross-repository edges")
@@ -353,25 +359,59 @@ async def run_graph_org_stats(json_output: bool = False) -> None:
     print(f"{'='*60}\n")
 
 
-async def run_graph_org_repositories(json_output: bool = False) -> None:
-    """List registered repository namespaces."""
+async def run_graph_org_repositories(
+    json_output: bool = False,
+    q: str = "",
+    organization: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> None:
+    """List registered repository namespaces (search + pagination).
+
+    Phase 20A6 dashboard selector support: ``q`` filters by repository_id /
+    name / path (case-insensitive substring); ``organization`` filters by
+    organization_id; ``limit``/``offset`` paginate large orgs.
+    """
     _ensure_utf8_stdout()
     org = _get_org_service()
     repos = org.repositories()
+    query = q.strip().lower()
+    org_filter = organization.strip().lower()
+    matched = []
+    for ns in repos:
+        if org_filter and (ns.organization_id or "").lower() != org_filter:
+            continue
+        if query:
+            haystack = " ".join([
+                ns.repository_id, ns.name or "", ns.path or "",
+            ]).lower()
+            if query not in haystack:
+                continue
+        matched.append(ns)
+    limit = min(max(limit, 1), 250)
+    offset = max(offset, 0)
+    page = matched[offset:offset + limit]
 
     if json_output:
         import json
 
         print(json.dumps(
-            {"repositories": [r.model_dump() for r in repos]},
+            {
+                "repositories": [r.model_dump() for r in page],
+                "count": len(page),
+                "total": len(matched),
+                "limit": limit,
+                "offset": offset,
+            },
             indent=2, default=str,
         ))
         return
 
     print(f"\n{'='*60}")
-    print(f"  Registered Repositories ({len(repos)})")
+    print(f"  Registered Repositories ({len(matched)} matched, showing "
+          f"{offset + 1}-{offset + len(page)})")
     print(f"{'='*60}\n")
-    for ns in repos[:50]:
+    for ns in page:
         print(f"  {ns.repository_id:<20} {ns.name[:40]:<42} {ns.source_type}")
         if ns.path:
             print(f"    path: {ns.path[:100]}")

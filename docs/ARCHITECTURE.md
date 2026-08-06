@@ -433,8 +433,10 @@ Dashboard (Next.js 14, TypeScript, Tailwind CSS)
     ├── /dashboard/testing             — Testing view
     ├── /dashboard/repair              — Repair view
     ├── /dashboard/review              — Review & quality gate
-    ├── /dashboard/runs                — Run list (Phase 10)
-    ├── /dashboard/runs/[id]           — Run detail timeline (Phase 10)
+    ├── /dashboard/runs                — Run list (Phase 10; multi-repo badges)
+    ├── /dashboard/runs/[id]           — Run detail timeline (Phase 10) + repository
+    │                                    status cards, per-repo execution timeline,
+    │                                    organization summary, run history (Phase 20A6)
     ├── /dashboard/durability          — Durability report (Phase 19)
     ├── /dashboard/engineering-graph   — EKG graph explorer (Phase 18)
     │                                    + interactive React Flow view,
@@ -499,6 +501,82 @@ llm_factory.get_provider()  ──►  RoutedProvider facade (agents unchanged)
 
 ---
 
+## Multi-Repository Dashboard (Phase 20A6)
+
+The user experience on top of the cross-repository execution layer (Phase 20A1–A5).
+No backend redesign: a dedicated **view builder** re-shapes what the orchestrator, EKG,
+and organization graph already produce into a repository-aware dashboard.
+
+```text
+Organization
+    ↓  Repository Selection  (search / filter / pagination / multi-select)
+    ↓
+Cross-Repository Run   (primary + auxiliary repositories, ordering,
+    ↓                    relationships, acceptance criteria, execution budget)
+    ↓
+Execution Timeline     (per-repo: planning → coding → testing → repair → review → gate)
+    ↓
+Repository Status      (current stage, progress, validation, EKG status, memory)
+    ↓
+Organization Summary   (participating/successful/failed/repaired, duration,
+                         decisions, consensus, quality status)
+```
+
+### View builder (`app/services/run_dashboard.py`)
+
+- `build_repository_view(run, org_service)` — per-repository status cards: primary +
+  auxiliary repositories in materialized order (`ordering`), the six-stage per-repo
+  timeline (`progress`), validation/application status, changed files, and per-repo EKG
+  stats from `org_service.repository_stats()` (gracefully empty when unregistered).
+- `build_organization_summary(run, org_service)` — participating / successful / failed /
+  repaired repositories, duration (from `started_at`/`finished_at`), engineering
+  decisions + consensus summary (from `decision_recorded` / `consensus_built` /
+  `conflict_detected` events), quality status + quality-gate detail, org-graph stats.
+- **Duck-typed** for both `DevPilotRun` (live run, WebSocket) and `DevPilotRunResult`
+  (final result) — one code path, no divergence between live and final views.
+- **Evidence-only & isolated**: only namespaces actually materialized for the run are
+  surfaced; hidden reasoning, secrets, and credentials are never included.
+
+### Consumers (all reuse the builders)
+
+| Consumer | Surface |
+|---|---|
+| `GET /api/v1/runs/{id}` | `repositories` + `organization_summary` in the payload |
+| `POST /api/v1/runs` | final result carries the same repository-aware surface |
+| `GET /api/v1/runs` | `repository_count` per run (multi-repo badges) |
+| WebSocket broadcast | `_broadcast_update` payload carries `repositories` + `organization_summary` for live card updates |
+| `python -m app.cli run` | Participating Repositories + Organization Summary blocks; `--json` emits pure JSON with both merged |
+| Run creation | `POST /api/v1/runs` accepts advisory `acceptance_criteria` + `execution_budget` (recorded on `RunSource`) |
+
+### Repository selection (org-graph API)
+
+- `GET /api/v1/graph/org/repositories?q=&organization=&limit=&offset=` — search +
+  filter + pagination over registered namespaces (lazy-loaded by the frontend
+  `RepositorySelector`).
+- `GET /api/v1/graph/org/repositories/{id}` — per-repository EKG stats (404 for unknown).
+
+### Frontend components (`frontend/src/components/runs/`)
+
+- `RepositorySelector` — search/filter, lazy-load pagination, multi-select with
+  dependency + status badges (used in `CreateRunModal`).
+- `RepositoryStatusCards` — live per-repo cards (stage, progress, validation, EKG status)
+  with navigation links into the org-graph / EKG views.
+- `RepositoryTimeline` — per-repository six-stage execution timeline.
+- `OrganizationSummary` — run-completion organization-level summary.
+- `RunHistoryPanel` — context & run history (recent runs, repository relationships,
+  prior executions, engineering decisions).
+
+Pure mappers live in `frontend/src/lib/graph/repositoryStatusModel.ts` (unit-tested);
+the WebSocket hook carries the repository-aware payload so cards update live.
+
+### Restart recovery
+
+`PostgresRunStore` round-trips `repository_path`, `auxiliary_repositories`, and
+`repo_patches` through `context_json`, so a backend restart rebuilds the identical
+repository-aware dashboard view from persisted state (demo M).
+
+---
+
 ## Future Phases
 
 | Phase | Focus | Status |
@@ -525,6 +603,6 @@ llm_factory.get_provider()  ──►  RoutedProvider facade (agents unchanged)
 | 19 | Semantic EKG Retrieval + EKG-driven test selection | ✅ Complete |
 | 19B | Multi-Provider Failover & Reliability Platform | ✅ Complete |
 | 19C | Cross-repo namespaces + interactive EKG viz + multi-repo acquisition + org-scope queries | ✅ Complete |
-| 20 | Cross-Repository Autonomous Engineering & Production Readiness | ⏳ Proposed (see `workflow-status/PHASE20_ROADMAP.md`) |
+| 20 | Cross-Repository Autonomous Engineering & Production Readiness (A1–A6: multi-repo runs, per-repo scope + EKG ingestion, repository dashboard; B1–B3: provider routing resilience; D: org-graph UI parity; E: unittest/Vitest/Jest parsers) | ✅ Complete (see `workflow-status/PHASE20_ROADMAP.md` + `PHASE20A6_COMPLETION_REPORT.md`) |
 
 
