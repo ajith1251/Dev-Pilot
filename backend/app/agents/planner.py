@@ -44,6 +44,12 @@ MAX_RISKS = 10
 MAX_AMBIGUITIES = 10
 MAX_DESC_CHARS = 5000
 
+# ── Plan resilience ─────────────────────────────────────────────
+# Bounded corrective retries: on a failed plan validation the raw output +
+# errors are resent to the provider so a well-formed plan can be recovered.
+# The final attempt's plan is returned regardless (deterministic gates decide).
+MAX_PLAN_ATTEMPTS = 2
+
 
 class PlannerInput:
     """Input to the Planner Agent (not a Pydantic model to avoid over-engineering)."""
@@ -214,26 +220,56 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
                 LLMMessage(role="user", content=user_prompt),
             ]
 
-            response = await provider.chat(
-                messages,
-                config=LLMConfig(temperature=0.1, max_tokens=4096, capability="planning"),
-            )
-
-            raw = response.content.strip()
-            parsed = self._parse_json_response(raw)
-
-            plan = self._build_plan(requirements.objective, parsed)
-
-            # Validate plan
-            validation = self._validate_plan(plan)
-            if not validation.is_valid:
-                logger.warning(
-                    "Plan validation had %d errors: %s",
-                    len(validation.errors),
-                    "; ".join(validation.errors[:3]),
+            last_plan: Optional[ImplementationPlan] = None
+            for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
+                response = await provider.chat(
+                    messages,
+                    config=LLMConfig(
+                        temperature=0.1,
+                        max_tokens=4096,
+                        capability="planning",
+                    ),
                 )
 
-            return plan
+                raw = response.content.strip()
+                parsed = self._parse_json_response(raw)
+                plan = self._build_plan(requirements.objective, parsed)
+                validation = self._validate_plan(plan)
+                last_plan = plan
+
+                if validation.is_valid:
+                    return plan
+
+                logger.warning(
+                    "Plan validation had %d errors: %s (attempt %d/%d)",
+                    len(validation.errors),
+                    "; ".join(validation.errors[:3]),
+                    attempt,
+                    MAX_PLAN_ATTEMPTS,
+                )
+                if attempt >= MAX_PLAN_ATTEMPTS:
+                    break
+
+                # Corrective retry: resend the failed output + validation
+                # errors so the next attempt can produce a well-formed plan.
+                corrective = (
+                    "Your previous response failed strict JSON plan validation.\n"
+                    "Validation errors:\n- "
+                    + "\n- ".join(validation.errors[:5])
+                    + "\n\nDo not repeat the failure. Respond with ONLY the "
+                    "corrected JSON plan object (no prose, no code fences).\n\n"
+                    "Your previous (invalid) response was:\n```\n"
+                    + raw[:4000]
+                    + "\n```"
+                )
+                messages = [
+                    LLMMessage(role="system", content=PLANNER_SYSTEM_PROMPT),
+                    LLMMessage(role="user", content=user_prompt),
+                    LLMMessage(role="assistant", content=raw[:4000]),
+                    LLMMessage(role="user", content=corrective),
+                ]
+
+            return last_plan
 
         except Exception as exc:
             logger.error("Planning failed: %s", exc)
@@ -247,7 +283,8 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
     # ── JSON parsing ──────────────────────────────────────────
 
     def _parse_json_response(self, text: str) -> Dict[str, Any]:
-        """Parse JSON from LLM response, handling markdown fences."""
+        """Parse JSON from LLM response, handling markdown fences and common
+        malformed JSON from weaker models (repair fallback)."""
         cleaned = text.strip()
 
         if cleaned.startswith("```"):
@@ -255,25 +292,49 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
             cleaned = re.sub(r"\n?\s*```\s*$", "", cleaned)
         cleaned = cleaned.strip()
 
-        # Try direct parse
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # Extract JSON object with balanced braces
-        start = cleaned.find("{")
-        if start == -1:
-            logger.warning("No JSON object found in planner LLM response")
+        if not cleaned:
+            logger.warning("Empty planner LLM response")
             return {}
+
+        candidates = [cleaned]
+        extracted = self._extract_json_object(cleaned)
+        if extracted and extracted != cleaned:
+            candidates.append(extracted)
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+            repaired = self._repair_json_text(candidate)
+            if repaired is not None:
+                try:
+                    parsed = json.loads(repaired)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+        logger.warning("Failed to parse planner JSON")
+        return {}
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """Extract the first balanced-brace JSON object (best effort)."""
+        start = text.find("{")
+        if start == -1:
+            return ""
 
         depth = 0
         in_string = False
         escape = False
         end = start
 
-        for i in range(start, len(cleaned)):
-            ch = cleaned[i]
+        for i in range(start, len(text)):
+            ch = text[i]
             if escape:
                 escape = False
                 continue
@@ -293,14 +354,131 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
                         break
 
         if depth != 0:
-            logger.warning("Unbalanced braces in planner LLM response")
-            return {}
+            return ""
+        return text[start:end]
+
+    @staticmethod
+    def _repair_json_text(text: str) -> Optional[str]:
+        """Best-effort repair of common malformed JSON emitted by weaker LLMs.
+
+        Applies cumulative fixes (unicode punctuation, control chars, trailing
+        commas, single-quoted strings, unquoted keys, bare None/True/False) and
+        returns the repaired text only if it finally parses as JSON.
+        """
+        t = text
+        for src, dst in (
+            ("\u201c", '"'), ("\u201d", '"'),
+            ("\u2018", "'"), ("\u2019", "'"),
+            ("\u2014", "-"), ("\u2013", "-"),
+            ("\u2026", "..."), ("\u00a0", " "),
+            ("\u200b", ""), ("\ufeff", ""),
+        ):
+            t = t.replace(src, dst)
+
+        t = "".join(ch for ch in t if ch in "\t\n\r" or ord(ch) >= 32)
+
+        t = PlannerAgent._fix_single_quotes(t)
+        masked, tokens = PlannerAgent._mask_string_contents(t)
+
+        masked = re.sub(r",\s*([}\]])", r"\1", masked)
+        masked = re.sub(
+            r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', masked
+        )
+        masked = re.sub(r"\bNone\b", "null", masked)
+        masked = re.sub(r"\bTrue\b", "true", masked)
+        masked = re.sub(r"\bFalse\b", "false", masked)
+
+        repaired = PlannerAgent._unmask_string_contents(masked, tokens)
 
         try:
-            return json.loads(cleaned[start:end])
+            json.loads(repaired)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse planner JSON")
-            return {}
+            return None
+        return repaired
+
+    @staticmethod
+    def _fix_single_quotes(text: str) -> str:
+        """Convert single-quoted strings to double-quoted, ignoring double-quoted
+        regions (so apostrophes inside real JSON strings are never touched)."""
+        out: list[str] = []
+        i, n = 0, len(text)
+        in_double = False
+        while i < n:
+            c = text[i]
+            if in_double:
+                out.append(c)
+                if c == "\\" and i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    in_double = False
+                i += 1
+                continue
+            if c == '"':
+                in_double = True
+                out.append(c)
+                i += 1
+                continue
+            if c == "'":
+                j = i + 1
+                buf: list[str] = []
+                while j < n and text[j] != "'":
+                    buf.append(text[j])
+                    j += 1
+                if j < n:
+                    content = "".join(buf)
+                    content = content.replace("\\", "\\\\").replace('"', '\\"')
+                    out.append('"')
+                    out.append(content)
+                    out.append('"')
+                    i = j + 1
+                    continue
+            out.append(c)
+            i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _mask_string_contents(text: str) -> tuple[str, list[str]]:
+        """Replace double-quoted string bodies with placeholders so regex repairs
+        never touch string values; returns (masked_text, tokens)."""
+        tokens: list[str] = []
+        out: list[str] = []
+        i, n = 0, len(text)
+        while i < n:
+            ch = text[i]
+            if ch == '"':
+                j = i + 1
+                body: list[str] = []
+                while j < n:
+                    c = text[j]
+                    if c == "\\":
+                        body.append(c)
+                        if j + 1 < n:
+                            body.append(text[j + 1])
+                        j += 2
+                        continue
+                    if c == '"':
+                        break
+                    body.append(c)
+                    j += 1
+                if j < n:
+                    token = f"\x00STR{len(tokens)}\x00"
+                    tokens.append("".join(body))
+                    out.append('"')
+                    out.append(token)
+                    out.append('"')
+                    i = j + 1
+                    continue
+            out.append(ch)
+            i += 1
+        return "".join(out), tokens
+
+    @staticmethod
+    def _unmask_string_contents(masked: str, tokens: list[str]) -> str:
+        for idx, token in enumerate(tokens):
+            masked = masked.replace(f"\x00STR{idx}\x00", token)
+        return masked
 
     # ── Plan building ─────────────────────────────────────────
 

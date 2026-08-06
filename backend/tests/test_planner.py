@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.agents.planner import PlannerAgent, PlannerInput
+from app.agents.planner import MAX_PLAN_ATTEMPTS, PlannerAgent, PlannerInput
 from app.models.issues import (
     Ambiguity,
     Constraint,
@@ -403,6 +403,117 @@ class TestPlannerAgent:
         """Empty response should return empty dict."""
         result = agent._parse_json_response("")
         assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_json_parse_repairs_trailing_commas(self, agent: PlannerAgent) -> None:
+        """Trailing commas inside objects/arrays should be repaired."""
+        text = '{"summary": "x", "steps": [{"id": "S1", "title": "t",},],}'
+        result = agent._parse_json_response(text)
+        assert result["summary"] == "x"
+        assert result["steps"][0]["id"] == "S1"
+
+    @pytest.mark.asyncio
+    async def test_json_parse_repairs_unquoted_keys(self, agent: PlannerAgent) -> None:
+        """Unquoted keys should be quoted without touching string values."""
+        text = '{summary: "contains, b: colon", steps: [{id: "S1", title: "t"}]}'
+        result = agent._parse_json_response(text)
+        assert result["summary"] == "contains, b: colon"
+        assert result["steps"][0]["id"] == "S1"
+
+    @pytest.mark.asyncio
+    async def test_json_parse_repairs_single_quotes(self, agent: PlannerAgent) -> None:
+        """Single-quoted strings (incl. nested quotes) should become JSON strings."""
+        text = "{'summary': 'he said \"hi\"', 'steps': [{'id': 'S1', 'title': \"don't\"}]}"
+        result = agent._parse_json_response(text)
+        assert result["summary"] == 'he said "hi"'
+        assert result["steps"][0]["title"] == "don't"
+
+    @pytest.mark.asyncio
+    async def test_json_parse_repairs_bare_booleans(self, agent: PlannerAgent) -> None:
+        """Bare None/True/False should become JSON null/true/false."""
+        text = '{"summary": "x", "risks": None, "strict": True, "audit": False}'
+        result = agent._parse_json_response(text)
+        assert result["risks"] is None
+        assert result["strict"] is True
+        assert result["audit"] is False
+
+    @pytest.mark.asyncio
+    async def test_json_parse_repairs_unicode_punctuation(self, agent: PlannerAgent) -> None:
+        """Smart quotes / em-dashes should be normalized to ASCII JSON."""
+        text = "{\u201csummary\u201d: \u201cx\u2014y\u201d, \u2018steps\u2019: \u2018\u2019}"
+        result = agent._parse_json_response(text)
+        assert result["summary"] == "x-y"
+        assert result["steps"] == ""
+
+    @pytest.mark.asyncio
+    async def test_json_parse_hopeless_returns_empty(self, agent: PlannerAgent) -> None:
+        """Unrepairable input should degrade to an empty dict, never raise."""
+        result = agent._parse_json_response("just some prose, no json at all")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_plan_corrective_retry_recovers(self, agent: PlannerAgent) -> None:
+        """A failed plan validation should trigger one corrective retry that can
+        recover a valid plan."""
+        requirements = make_valid_requirements()
+        inp = PlannerInput(requirements=requirements)
+
+        with patch("app.agents.planner.llm_factory") as mock_factory:
+            mock_provider = AsyncMock()
+            mock_provider.chat = AsyncMock(
+                side_effect=[
+                    MagicMock(content=INVALID_PLAN_JSON),
+                    MagicMock(content=VALID_PLAN_JSON),
+                ]
+            )
+            mock_factory.get_provider = MagicMock(return_value=mock_provider)
+
+            plan = await agent.execute(inp)
+
+        assert mock_provider.chat.call_count == 2
+        assert plan.error is None
+        assert len(plan.steps) == 3
+        corrective_messages = mock_provider.chat.call_args_list[1].args[0]
+        assert corrective_messages[-1].content.startswith(
+            "Your previous response failed strict JSON plan validation."
+        )
+        assert "Plan has no steps" in corrective_messages[-1].content
+
+    @pytest.mark.asyncio
+    async def test_plan_corrective_retry_bounded(self, agent: PlannerAgent) -> None:
+        """Corrective retries are bounded to MAX_PLAN_ATTEMPTS total calls."""
+        requirements = make_valid_requirements()
+        inp = PlannerInput(requirements=requirements)
+
+        with patch("app.agents.planner.llm_factory") as mock_factory:
+            mock_provider = AsyncMock()
+            mock_provider.chat = AsyncMock(
+                return_value=MagicMock(content=INVALID_PLAN_JSON)
+            )
+            mock_factory.get_provider = MagicMock(return_value=mock_provider)
+
+            plan = await agent.execute(inp)
+
+        assert mock_provider.chat.call_count == MAX_PLAN_ATTEMPTS
+        assert plan.steps == []
+
+    @pytest.mark.asyncio
+    async def test_valid_plan_returns_without_retry(self, agent: PlannerAgent) -> None:
+        """A valid first response should not trigger a corrective retry."""
+        requirements = make_valid_requirements()
+        inp = PlannerInput(requirements=requirements)
+
+        with patch("app.agents.planner.llm_factory") as mock_factory:
+            mock_provider = AsyncMock()
+            mock_provider.chat = AsyncMock(
+                return_value=MagicMock(content=VALID_PLAN_JSON)
+            )
+            mock_factory.get_provider = MagicMock(return_value=mock_provider)
+
+            plan = await agent.execute(inp)
+
+        assert mock_provider.chat.call_count == 1
+        assert len(plan.steps) == 3
 
     @pytest.mark.asyncio
     async def test_cycle_detection(self, agent: PlannerAgent) -> None:
