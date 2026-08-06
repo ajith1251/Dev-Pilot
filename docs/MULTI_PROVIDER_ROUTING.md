@@ -52,32 +52,57 @@ llm_factory.get_provider() ──► RoutedProvider (facade, same BaseLLMProvide
       │  • MetricsRegistry              totals + failover event ring buffer
       │  • AllProvidersFailedError      never silent, per-provider failures
       ▼
- BaseLLMProvider implementations
-   openai · anthropic · gemini · openrouter · ollama · fake
+  BaseLLMProvider implementations
+   nvidia · gemini · cloudflare · ollama_cloud · opencode_zen · openai · anthropic · openrouter · ollama · openai_compatible · fake
 ```
 
 ### 2.1 Provider registry
 
 | Provider | Key/Config | Default model | Notes |
 |----------|-----------|---------------|-------|
+| `nvidia` | `NVIDIA_API_KEY` | `meta/llama-3.1-8b-instruct` | **OpenAI-compatible** NIM inference (hosted build / self-hosted). Per-request client timeout + transport retries via `DEVPILOT_NVIDIA_TIMEOUT_SECONDS` / `DEVPILOT_NVIDIA_MAX_RETRIES` (see §2.12) |
 | `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` | Free tier: multi-model daily-quota failover. Paid tier (`DEVPILOT_GEMINI_TIER=paid`): no daily-quota failover/markers, optional `DEVPILOT_GEMINI_PAID_MODELS` (see §2.9) |
+| `cloudflare` | `CLOUDFLARE_API_KEY` | `@cf/meta/llama-4-scout-17b-16e-instruct` | **OpenAI-compatible** Workers AI. Base URL auto-built from `CLOUDFLARE_ACCOUNT_ID`, or `CLOUDFLARE_BASE_URL`. Default live-verified fastest Workers AI model (~0.5s TTF, 17B MoE); the 2024-era `@cf/meta/llama-3.1-8b-instruct` was deprecated 2026-05-30 (410). `DEVPILOT_CLOUDFLARE_TIMEOUT_SECONDS` / `_MAX_RETRIES` |
+| `ollama_cloud` | `OLLAMA_CLOUD_API_KEY` | `gemma4:31b` | **OpenAI-compatible** hosted Ollama (`https://ollama.com/v1`) — GPU-only sizes without a local GPU. Default live-verified reliable even at small `max_tokens`; gpt-oss/nemotron models on this endpoint return empty content at `max_tokens<64` (see §2.13) |
+| `opencode_zen` | `OPENCODE_ZEN_API_KEY` | `deepseek-v4-flash-free` | **OpenAI-compatible** gateway (`https://opencode.ai/zen/v1`). Free-tier model ids end `-free` (see §2.13) |
 | `openai` | `OPENAI_API_KEY` | vendor default | |
 | `anthropic` | `ANTHROPIC_API_KEY` | vendor default | |
 | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` | OpenAI-compatible |
 | `ollama` | `OLLAMA_BASE_URL` | `llama3.2` | **Keyless** — local/self-hosted |
+| `openai_compatible` | `OPENAI_COMPATIBLE_BASE_URL` | `DEVPILOT_OPENAI_COMPATIBLE_MODEL` (or sentinel default) | **Generic OpenAI-compatible endpoint** — vLLM, TGI, llama.cpp, LM Studio, remote Ollama, OpenAI-compatible cloud gateways. Optional `OPENAI_COMPATIBLE_API_KEY`; `_TIMEOUT_SECONDS` / `_MAX_RETRIES` |
 | `fake` | always available | `gpt-4o-mini` | Tests / no-key CI |
 
-A provider is **configured** when its key (or base URL for Ollama) is set —
-`fake` is always configured. A provider that is not configured is skipped
-during routing, so a default `.env` with only `GEMINI_API_KEY` routes
-`gemini → fake` and still works with **zero** other keys.
+The registry is the **single registration point** for providers
+(`app/llm/provider_registry.py`, Phase 20F). `LLMFactory` builds its provider
+map, and `ProviderRouter` builds its availability checks + canonical order,
+from the registry — adding a provider is one `ProviderSpec` entry there plus a
+config block in `app/config.py` plus a `BaseLLMProvider` implementation; no
+agent, factory or router routing code changes.
+
+A provider is **configured** when its key (or base URL for Ollama / the
+generic endpoint) is set — `fake` is always configured. A provider that is not
+configured is skipped during routing, so a default `.env` with only
+`NVIDIA_API_KEY` routes `nvidia → gemini → fake` and still works with **zero**
+other keys.
 
 ### 2.2 Priority
 
 Default order (deterministic): `[DEVPILOT_LLM_PROVIDER]` first, then the
-canonical order `gemini, openai, anthropic, openrouter, ollama, fake`,
-deduplicated. Override with `PROVIDER_PRIORITY` (comma string or JSON list,
-e.g. `anthropic,ollama,fake`).
+canonical order `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai,
+anthropic, openrouter, ollama, openai_compatible, fake`, deduplicated. With
+`DEVPILOT_LLM_PROVIDER=nvidia` (the default) the chain is exactly
+`nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai, anthropic,
+openrouter, ollama, openai_compatible, fake`. Override with `PROVIDER_PRIORITY`
+(comma string or JSON list, e.g. `anthropic,ollama,fake`).
+
+**Disabling without deleting keys** — `DEVPILOT_PROVIDER_DISABLED` excludes
+providers from routing while keeping their credentials and health metadata: a
+disabled provider reports `enabled=false` (and `disabled=true` in
+`config_snapshot()`) and is never tried. From `.env`/process env list fields
+are decoded as JSON **before** validators run, so use the JSON-array form
+there (`DEVPILOT_PROVIDER_DISABLED=["anthropic","openai"]`); the comma string
+only works when the value is passed programmatically (e.g.
+`Settings(DEVPILOT_PROVIDER_DISABLED="anthropic,openai")`).
 
 ### 2.3 Failure classification (`FailureKind`)
 
@@ -241,7 +266,98 @@ before it leaves the backend: keys named like `api_key`, `token`, `secret`,
 are replaced with masked suffixes (e.g. `sk-…a1b2`). The config surface and
 API responses never contain raw credentials. This is applied at the router
 boundary (`config_snapshot()`), so even a future endpoint that serializes the
-full snapshot is safe.
+full snapshot is safe. `NVIDIA_API_KEY` is covered by the same markers and
+never appears in snapshots.
+
+### 2.12 NVIDIA NIM (default provider)
+
+NVIDIA NIM is the default provider: `backend/.env` ships
+`DEVPILOT_LLM_PROVIDER=nvidia` with the priority chain
+`nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai, anthropic,
+openrouter, ollama, openai_compatible, fake`. It is a thin
+OpenAI-compatible wrapper (`app/llm/providers/nvidia.py`) — the same code path
+used by OpenAI/OpenRouter/Cloudflare/Ollama Cloud/OpenCode Zen/the generic
+endpoint — so every model a NIM endpoint serves works without provider-specific
+code.
+
+- Endpoint: `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`,
+  the hosted NIM build). Point it at a self-hosted NIM microservice for a
+  private deployment.
+- Model: `DEVPILOT_NVIDIA_MODEL` (default `meta/llama-3.1-8b-instruct` — the
+  bake-off winner: fastest cold-start + best free-tier availability on the
+  hosted   catalog, clean JSON + code; see the shortlist table in
+  `workflow-status/NVIDIA_PROVIDER_COMPLETION_REPORT.md` §5), independent of
+  `DEVPILOT_LLM_MODEL` so the provider keeps its own default
+  across failover.
+- Transport: `DEVPILOT_NVIDIA_TIMEOUT_SECONDS` (default `300`) and
+  `DEVPILOT_NVIDIA_MAX_RETRIES` (default `2`) are passed straight to the
+  OpenAI-compatible client (`AsyncOpenAI(..., timeout=..., max_retries=...)`).
+  These are per-request, on top of router-level retry/failover.
+- **Cold start:** the hosted NIM build lazily spins up an inference pod, so a
+  cold first call can take **60–370s** for first token (observed on the 70B
+  model). Small models (`meta/llama-3.1-8b-instruct`,
+  `nvidia/nemotron-mini-4b-instruct`) keep pods warm and answer in <1s; the 49B
+  is instant when warm. `.env` ships `DEVPILOT_PROVIDER_TIMEOUT_SECONDS=60` —
+  the cold-start-optimized value: a request waits at most ~60s on a cold NIM
+  pod, then the router retries and fails over to the sub-second backups
+  (cloudflare llama-4-scout ~0.5s, ollama_cloud gemma4:31b ~0.75s) instead of
+  waiting out the spin-up; NVIDIA returns automatically once its pod is warm.
+  Keep `DEVPILOT_NVIDIA_TIMEOUT_SECONDS` ≥ the router timeout so the router's
+  bounded retry/failover is the effective policy. Raise the router timeout only
+  if you'd rather wait out a legit NVIDIA cold start than use a backup.
+- A missing `NVIDIA_API_KEY` reports the provider as **not configured**; the
+  router then fails over to the next configured provider (e.g. Gemini), so a
+  keyless `.env` keeps working.
+- Key: https://build.nvidia.com
+
+### 2.13 Backup providers — Cloudflare Workers AI, Ollama Cloud, OpenCode Zen + generic OpenAI-compatible
+
+Backup providers are thin OpenAI-compatible wrappers so they need **no
+provider-specific agent or router code**:
+
+- **`cloudflare`** (`app/llm/providers/cloudflare.py`) — Cloudflare Workers AI.
+  Requires `CLOUDFLARE_API_KEY`; the base URL is built automatically from
+  `CLOUDFLARE_ACCOUNT_ID`
+  (`https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1`) or overridden
+  with `CLOUDFLARE_BASE_URL`. Model via `DEVPILOT_CLOUDFLARE_MODEL`. Default
+  `@cf/meta/llama-4-scout-17b-16e-instruct` — live-verified **fastest** Workers
+  AI model (~0.5s TTF, 17B MoE) and the best cold-start fit for a failover
+  backup. The 2024-era `@cf/meta/llama-3.1-8b-instruct` was **deprecated
+  2026-05-30** (returns HTTP 410); a slower 8B alternative is
+  `@cf/meta/llama-3.1-8b-instruct-fp8`. Cloudflare's OpenAI-compat endpoint has
+  **no `GET /models`** (405) — probe providers with a chat call, not a model
+  list. Note: llama-4-scout's stream can emit **non-string (int)
+  `delta.content`** chunks — `CloudflareProvider.chat_stream` skips non-string
+  deltas (regression-tested).
+- **`ollama_cloud`** (`app/llm/providers/ollama_cloud.py`) — hosted Ollama via
+  `https://ollama.com/v1` (GPU-only model sizes without a local GPU). Requires
+  `OLLAMA_CLOUD_API_KEY`; model via `DEVPILOT_OLLAMA_CLOUD_MODEL`. Default
+  `gemma4:31b` was live-verified to return content even at `max_tokens=32`
+  (3/3); `gpt-oss:120b`/`gpt-oss:20b` and `nemotron-3-nano:30b` on this
+  endpoint can return **empty content** at `max_tokens<64` — the reason the
+  default is not gpt-oss despite it being the stronger coder. A few catalog
+  models (`deepseek-v4-flash:preview`, `glm-5.1`, `kimi-*`, `minimax-m2.7`) are
+  subscription-only and 403 from a free key.
+- **`opencode_zen`** (`app/llm/providers/opencode_zen.py`) — OpenAI-compatible
+  gateway at `https://opencode.ai/zen/v1`. Requires `OPENCODE_ZEN_API_KEY`;
+  model via `DEVPILOT_OPENCODE_ZEN_MODEL`. Free-tier model ids end in `-free`
+  (`deepseek-v4-flash-free` default, `big-pickle`, `north-mini-code-free`,
+  `laguna-s-2.1-free`, ...) — all live-verified on a free key.
+- **`openai_compatible`** (`app/llm/providers/openai_compatible.py`) — any
+  endpoint that speaks the OpenAI chat-completions API: self-hosted
+  vLLM/TGI, llama.cpp/LM Studio, a remote Ollama server, or an
+  OpenAI-compatible cloud gateway. Requires `OPENAI_COMPATIBLE_BASE_URL`;
+  `OPENAI_COMPATIBLE_API_KEY` is optional (keyless local servers ignore it),
+  and `DEVPILOT_OPENAI_COMPATIBLE_MODEL` names the model the endpoint serves.
+
+All four honour per-provider timeouts/retries passed to the OpenAI-compatible
+client (`DEVPILOT_CLOUDFLARE_TIMEOUT_SECONDS`/`_MAX_RETRIES`,
+`DEVPILOT_OLLAMA_CLOUD_TIMEOUT_SECONDS`/`_MAX_RETRIES`,
+`DEVPILOT_OPENCODE_ZEN_TIMEOUT_SECONDS`/`_MAX_RETRIES`,
+`DEVPILOT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS`/`_MAX_RETRIES`) on top of
+router-level retry/failover. They surface automatically in the registry,
+health/metrics/config snapshots, `GET /api/v1/providers*` and the CLI —
+no other wiring needed.
 
 ---
 
@@ -253,6 +369,7 @@ All settings live in `app/config.py`:
 |---------|---------|---------|
 | `PROVIDER_ROUTING_ENABLED` | `True` | Route via `RoutedProvider` when `get_provider(None)` is called |
 | `PROVIDER_PRIORITY` | *(empty)* | Override priority (comma string or JSON list) |
+| `PROVIDER_DISABLED` | *(empty)* | Providers excluded from routing; keeps their configured/health metadata. JSON array from `.env`/process env (list fields decode as JSON before validators), comma string programmatically |
 | `PROVIDER_TIMEOUT_SECONDS` | `60` | Per-call timeout via `asyncio.wait_for` |
 | `PROVIDER_RETRY_MAX` | `2` | Max retries per provider attempt |
 | `PROVIDER_RETRY_BASE_BACKOFF_SECONDS` | `0.5` | Exponential backoff base |
@@ -267,8 +384,26 @@ All settings live in `app/config.py`:
 | `PROVIDER_METRICS_PERSIST` | `True` | Best-effort PG metric snapshots |
 | `GEMINI_TIER` | `free` | Gemini key tier: `free` (daily per-model quota + cross-model failover) or `paid` (billing attached — no daily-quota failover/markers, fail-fast on billing errors) |
 | `GEMINI_PAID_MODELS` | *(empty)* | Paid-tier model list (comma string or JSON); first = default |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | NIM OpenAI-compatible inference endpoint (hosted build or self-hosted) |
+| `NVIDIA_TIMEOUT_SECONDS` | `300` | Per-request client timeout for NIM (≥ router timeout so bounded router retry/failover is the effective policy; tolerates 60–370s cold starts) |
+| `NVIDIA_MAX_RETRIES` | `2` | Transport-level retries per NIM request |
+| `CLOUDFLARE_ACCOUNT_ID` | *(empty)* | Workers AI account id — builds the default base URL |
+| `CLOUDFLARE_BASE_URL` | *(empty)* | Explicit Workers AI OpenAI-compatible endpoint override |
+| `CLOUDFLARE_TIMEOUT_SECONDS` | `60` | Per-request client timeout for Cloudflare |
+| `CLOUDFLARE_MAX_RETRIES` | `2` | Transport-level retries per Cloudflare request |
+| `OLLAMA_CLOUD_BASE_URL` | `https://ollama.com/v1` | Hosted Ollama OpenAI-compatible endpoint |
+| `OLLAMA_CLOUD_TIMEOUT_SECONDS` | `60` | Per-request client timeout for Ollama Cloud |
+| `OLLAMA_CLOUD_MAX_RETRIES` | `2` | Transport-level retries per Ollama Cloud request |
+| `OPENCODE_ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | OpenCode Zen OpenAI-compatible gateway |
+| `OPENCODE_ZEN_TIMEOUT_SECONDS` | `60` | Per-request client timeout for OpenCode Zen |
+| `OPENCODE_ZEN_MAX_RETRIES` | `2` | Transport-level retries per OpenCode Zen request |
+| `OPENAI_COMPATIBLE_BASE_URL` | *(empty)* | Generic OpenAI-compatible endpoint (required for `openai_compatible`) |
+| `OPENAI_COMPATIBLE_TIMEOUT_SECONDS` | `60` | Per-request client timeout for the generic endpoint |
+| `OPENAI_COMPATIBLE_MAX_RETRIES` | `2` | Transport-level retries per generic-endpoint request |
 
-Plus the new provider credentials: `OPENROUTER_API_KEY`, `OLLAMA_BASE_URL`.
+Plus the provider credentials: `NVIDIA_API_KEY`, `OPENROUTER_API_KEY`,
+`OLLAMA_BASE_URL`, `CLOUDFLARE_API_KEY`, `OLLAMA_CLOUD_API_KEY`,
+`OPENCODE_ZEN_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`.
 
 ---
 

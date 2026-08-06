@@ -41,6 +41,7 @@ from app.core.exceptions import (
 from app.core.logging import logger
 from app.llm.base import BaseLLMProvider, LLMConfig, LLMMessage, LLMResponse
 from app.llm.factory import factory as _default_factory
+from app.llm.provider_registry import provider_availability, provider_names
 from app.llm.redaction import redact_dict, redact_secret
 
 # ── Failure classification ─────────────────────────────────────
@@ -489,17 +490,12 @@ class MetricsRegistry:
 # ── Router ─────────────────────────────────────────────────────
 
 # name → (settings attr to check for availability, provider is always-present)
-_PROVIDER_AVAILABILITY: Dict[str, tuple] = {
-    "openai": ("OPENAI_API_KEY", False),
-    "anthropic": ("ANTHROPIC_API_KEY", False),
-    "gemini": ("GEMINI_API_KEY", False),
-    "openrouter": ("OPENROUTER_API_KEY", False),
-    "ollama": ("OLLAMA_BASE_URL", False),
-    "fake": ("", True),
-}
+# Derived from the centralized provider registry (Phase 20F) — the registry is
+# the single place to add a provider; this map follows automatically.
+_PROVIDER_AVAILABILITY: Dict[str, tuple] = dict(provider_availability())
 
 # Canonical registry order used to fill the default priority list.
-_CANONICAL_ORDER = ("gemini", "openai", "anthropic", "openrouter", "ollama", "fake")
+_CANONICAL_ORDER = provider_names()
 
 
 class ProviderRouter:
@@ -617,6 +613,11 @@ class ProviderRouter:
                     names.append(name)
         return names
 
+    def _disabled_names(self) -> List[str]:
+        """Providers excluded from routing via DEVPILOT_PROVIDER_DISABLED."""
+        raw = getattr(self._settings, "PROVIDER_DISABLED", None) or []
+        return [str(n).strip().lower() for n in raw if str(n).strip()]
+
     def _provider_configured(self, name: str) -> bool:
         if name == "fake":
             return True
@@ -628,6 +629,7 @@ class ProviderRouter:
 
     def _build_entries(self) -> List[ProviderEntry]:
         entries: List[ProviderEntry] = []
+        disabled = set(self._disabled_names())
         seen = set()
         for priority, name in enumerate(self._all_priority_names()):
             if name in seen:
@@ -648,6 +650,7 @@ class ProviderRouter:
                 provider=provider,
                 priority=priority,
                 configured=configured,
+                enabled=name not in disabled,
                 breaker=CircuitBreaker(**self._breaker_kwargs),
                 health=ProviderHealth(name, window=self._health_window),
                 default_model=default_model,
@@ -937,12 +940,14 @@ class ProviderRouter:
 
     def config_snapshot(self) -> Dict[str, Any]:
         """Redacted router configuration — NEVER includes raw secrets."""
+        disabled = set(self._disabled_names())
         availability = {}
         for name in _CANONICAL_ORDER:
             attr, _ = _PROVIDER_AVAILABILITY.get(name, (None, False))
             value = getattr(self._settings, attr, None) if attr else None
             availability[name] = {
                 "configured": bool(value) or name == "fake",
+                "disabled": name in disabled,
                 "key": redact_secret(str(value)) if value else "<not set>",
             }
         snapshot = redact_dict({

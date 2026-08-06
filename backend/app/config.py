@@ -96,6 +96,206 @@ class Settings(BaseSettings):
                     "reported as not-configured.",
     )
 
+    # ─── NVIDIA NIM ──────────────────────────────────────────────
+    NVIDIA_API_KEY: Optional[str] = Field(
+        default=None, alias="NVIDIA_API_KEY",
+        description="NVIDIA NIM hosted API key (OpenAI-compatible inference "
+                    "endpoint). Get one at https://build.nvidia.com — required "
+                    "for the 'nvidia' provider. When unset NVIDIA is reported "
+                    "as not-configured and the router fails over.",
+    )
+    NVIDIA_BASE_URL: str = Field(
+        default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL",
+        description="NVIDIA NIM OpenAI-compatible chat-completions endpoint. "
+                    "Defaults to the hosted build; point this at a self-hosted "
+                    "NIM microservice (or an NGC catalog endpoint) for a "
+                    "private deployment.",
+    )
+    NVIDIA_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_NVIDIA_MODEL",
+        description="NVIDIA NIM model override, e.g. 'meta/llama-3.1-8b-"
+                    "instruct' or 'nvidia/llama-3.3-nemotron-super-49b-v1'. "
+                    "Unset defaults to 'meta/llama-3.1-8b-instruct' (measured "
+                    "fastest cold-start + best free-tier availability of the "
+                    "hosted NIM catalog on the live key; see the bake-off "
+                    "table in workflow-status/NVIDIA_PROVIDER_COMPLETION_"
+                    "REPORT.md). Independent of DEVPILOT_LLM_MODEL (which is "
+                    "OpenAI-biased) so the provider keeps its own default "
+                    "across failover.",
+    )
+    NVIDIA_TIMEOUT_SECONDS: float = Field(
+        default=300.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_NVIDIA_TIMEOUT_SECONDS",
+        description="Per-request timeout passed to the OpenAI-compatible NIM "
+                    "client (transport level). Generous because the hosted "
+                    "build can take 60-370s to cold-start an inference pod on "
+                    "the first call; keep it >= the router timeout "
+                    "(DEVPILOT_PROVIDER_TIMEOUT_SECONDS) so the router's "
+                    "bounded retry/failover is the effective policy.",
+    )
+    NVIDIA_MAX_RETRIES: int = Field(
+        default=2, ge=0, le=10,
+        alias="DEVPILOT_NVIDIA_MAX_RETRIES",
+        description="Transport-level retries the OpenAI-compatible NIM client "
+                    "performs per request (on top of router-level failover).",
+    )
+
+    # ─── Cloudflare Workers AI (Phase 20F) ───────────────────────
+    CLOUDFLARE_API_KEY: Optional[str] = Field(
+        default=None, alias="CLOUDFLARE_API_KEY",
+        description="Cloudflare API token (Workers AI). Get one at "
+                    "https://dash.cloudflare.com/profile/api-tokens — required "
+                    "for the 'cloudflare' provider. When unset Cloudflare is "
+                    "reported as not-configured and the router fails over.",
+    )
+    CLOUDFLARE_ACCOUNT_ID: Optional[str] = Field(
+        default=None, alias="CLOUDFLARE_ACCOUNT_ID",
+        description="Cloudflare account id, used to build the default Workers "
+                    "AI OpenAI-compatible base URL. Optional when "
+                    "CLOUDFLARE_BASE_URL is set explicitly.",
+    )
+    CLOUDFLARE_BASE_URL: Optional[str] = Field(
+        default=None, alias="CLOUDFLARE_BASE_URL",
+        description="Cloudflare Workers AI OpenAI-compatible chat-completions "
+                    "endpoint. Defaults to "
+                    "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
+                    "/ai/v1 when CLOUDFLARE_ACCOUNT_ID is set.",
+    )
+    CLOUDFLARE_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_CLOUDFLARE_MODEL",
+        description="Cloudflare Workers AI model override, e.g. "
+                    "'@cf/meta/llama-4-scout-17b-16e-instruct'. Unset defaults "
+                    "to that model (live-verified fastest Workers AI model, "
+                    "~0.5s TTF, 17B MoE; the 2024-era "
+                    "'@cf/meta/llama-3.1-8b-instruct' was deprecated by "
+                    "Cloudflare in 2026). Independent of DEVPILOT_LLM_MODEL "
+                    "(which is OpenAI-biased) so the provider keeps its own "
+                    "default across failover.",
+    )
+    CLOUDFLARE_TIMEOUT_SECONDS: float = Field(
+        default=60.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_CLOUDFLARE_TIMEOUT_SECONDS",
+        description="Per-request timeout passed to the OpenAI-compatible "
+                    "Workers AI client (transport level). Keep it >= the "
+                    "router timeout (DEVPILOT_PROVIDER_TIMEOUT_SECONDS) so "
+                    "the router's bounded retry/failover is the effective "
+                    "policy.",
+    )
+    CLOUDFLARE_MAX_RETRIES: int = Field(
+        default=2, ge=0, le=10,
+        alias="DEVPILOT_CLOUDFLARE_MAX_RETRIES",
+        description="Transport-level retries the OpenAI-compatible Workers AI "
+                    "client performs per request (on top of router-level "
+                    "failover).",
+    )
+
+    # ─── Generic OpenAI-compatible endpoint (Phase 20F) ──────────
+    OPENAI_COMPATIBLE_BASE_URL: Optional[str] = Field(
+        default=None, alias="OPENAI_COMPATIBLE_BASE_URL",
+        description="Base URL of an arbitrary OpenAI-compatible chat-"
+                    "completions endpoint (self-hosted vLLM/TGI, llama.cpp, "
+                    "LM Studio, an OpenAI-compatible cloud gateway, a remote "
+                    "Ollama server, etc.). Required for the "
+                    "'openai_compatible' provider; when unset it is reported "
+                    "as not-configured and the router fails over.",
+    )
+    OPENAI_COMPATIBLE_API_KEY: Optional[str] = Field(
+        default=None, alias="OPENAI_COMPATIBLE_API_KEY",
+        description="Optional API key for the OpenAI-compatible endpoint. "
+                    "Most cloud gateways require one; local servers usually "
+                    "ignore it, so it may stay unset.",
+    )
+    OPENAI_COMPATIBLE_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_OPENAI_COMPATIBLE_MODEL",
+        description="Model served by the OpenAI-compatible endpoint, e.g. "
+                    "'meta-llama/Meta-Llama-3.1-8B-Instruct'. Set this for "
+                    "real use; unset falls back to the OpenAI-sentinel "
+                    "default. Independent of DEVPILOT_LLM_MODEL so the "
+                    "provider keeps its own default across failover.",
+    )
+    OPENAI_COMPATIBLE_TIMEOUT_SECONDS: float = Field(
+        default=60.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS",
+        description="Per-request timeout passed to the OpenAI-compatible "
+                    "client (transport level). Keep it >= the router timeout "
+                    "(DEVPILOT_PROVIDER_TIMEOUT_SECONDS).",
+    )
+    OPENAI_COMPATIBLE_MAX_RETRIES: int = Field(
+        default=2, ge=0, le=10,
+        alias="DEVPILOT_OPENAI_COMPATIBLE_MAX_RETRIES",
+        description="Transport-level retries the OpenAI-compatible client "
+                    "performs per request (on top of router-level failover).",
+    )
+
+    # ─── Ollama Cloud (Phase 20F) ─────────────────────────────────
+    OLLAMA_CLOUD_API_KEY: Optional[str] = Field(
+        default=None, alias="OLLAMA_CLOUD_API_KEY",
+        description="Ollama Cloud API key (https://ollama.com/settings/keys). "
+                    "Required for the 'ollama_cloud' provider; when unset it "
+                    "is reported as not-configured and the router fails over.",
+    )
+    OLLAMA_CLOUD_BASE_URL: Optional[str] = Field(
+        default=None, alias="OLLAMA_CLOUD_BASE_URL",
+        description="Ollama Cloud OpenAI-compatible chat-completions endpoint. "
+                    "Defaults to https://ollama.com/v1.",
+    )
+    OLLAMA_CLOUD_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_OLLAMA_CLOUD_MODEL",
+        description="Ollama Cloud model override, e.g. 'gemma4:31b' or "
+                    "'gpt-oss:120b'. Unset defaults to 'gemma4:31b' "
+                    "(live-verified to return content even at small "
+                    "max_tokens; gpt-oss/nemotron models on this endpoint "
+                    "can return empty content at max_tokens<64). Independent "
+                    "of DEVPILOT_LLM_MODEL so the provider keeps its own "
+                    "default across failover.",
+    )
+    OLLAMA_CLOUD_TIMEOUT_SECONDS: float = Field(
+        default=60.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_OLLAMA_CLOUD_TIMEOUT_SECONDS",
+        description="Per-request timeout passed to the Ollama Cloud "
+                    "OpenAI-compatible client (transport level). Keep it >= the "
+                    "router timeout (DEVPILOT_PROVIDER_TIMEOUT_SECONDS).",
+    )
+    OLLAMA_CLOUD_MAX_RETRIES: int = Field(
+        default=2, ge=0, le=10,
+        alias="DEVPILOT_OLLAMA_CLOUD_MAX_RETRIES",
+        description="Transport-level retries the Ollama Cloud client performs "
+                    "per request (on top of router-level failover).",
+    )
+
+    # ─── OpenCode Zen (Phase 20F) ────────────────────────────────
+    OPENCODE_ZEN_API_KEY: Optional[str] = Field(
+        default=None, alias="OPENCODE_ZEN_API_KEY",
+        description="OpenCode Zen API key (https://opencode.ai/zen). Required "
+                    "for the 'opencode_zen' provider; when unset it is "
+                    "reported as not-configured and the router fails over.",
+    )
+    OPENCODE_ZEN_BASE_URL: Optional[str] = Field(
+        default=None, alias="OPENCODE_ZEN_BASE_URL",
+        description="OpenCode Zen OpenAI-compatible chat-completions endpoint. "
+                    "Defaults to https://opencode.ai/zen/v1.",
+    )
+    OPENCODE_ZEN_MODEL: Optional[str] = Field(
+        default=None, alias="DEVPILOT_OPENCODE_ZEN_MODEL",
+        description="OpenCode Zen model override, e.g. 'deepseek-v4-flash'. "
+                    "Unset defaults to a curated fast model. Independent of "
+                    "DEVPILOT_LLM_MODEL so the provider keeps its own default "
+                    "across failover.",
+    )
+    OPENCODE_ZEN_TIMEOUT_SECONDS: float = Field(
+        default=60.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_OPENCODE_ZEN_TIMEOUT_SECONDS",
+        description="Per-request timeout passed to the OpenCode Zen "
+                    "OpenAI-compatible client (transport level). Keep it >= the "
+                    "router timeout (DEVPILOT_PROVIDER_TIMEOUT_SECONDS).",
+    )
+    OPENCODE_ZEN_MAX_RETRIES: int = Field(
+        default=2, ge=0, le=10,
+        alias="DEVPILOT_OPENCODE_ZEN_MAX_RETRIES",
+        description="Transport-level retries the OpenCode Zen client performs "
+                    "per request (on top of router-level failover).",
+    )
+
     # ─── GitHub ──────────────────────────────────────────────────
     GITHUB_TOKEN: Optional[str] = Field(default=None, alias="GITHUB_TOKEN")
 
@@ -248,6 +448,19 @@ class Settings(BaseSettings):
                     "'gemini,openai,anthropic,fake'. When empty the router "
                     "uses [LLM_PROVIDER] followed by every available provider.",
     )
+    PROVIDER_DISABLED: List[str] = Field(
+        default=[], alias="DEVPILOT_PROVIDER_DISABLED",
+        description="Provider names to disable entirely, e.g. 'anthropic,openai' "
+                    "or ['anthropic','openai']. NOTE: from .env / process env "
+                    "pydantic-settings decodes list fields as JSON before "
+                    "validators run, so use the JSON array form "
+                    "DEVPILOT_PROVIDER_DISABLED=['anthropic','openai'] there; "
+                    "the comma string only works when the value is passed "
+                    "programmatically. Disabled providers keep their "
+                    "configured/health metadata but are excluded from routing "
+                    "and report enabled=false. Empty = every configured "
+                    "provider is eligible.",
+    )
     LLM_PROVIDER_FALLBACKS: Dict[str, List[str]] = Field(
         default={}, alias="DEVPILOT_LLM_PROVIDER_FALLBACKS",
         description="Per-capability typed provider fallback chains, e.g. "
@@ -261,7 +474,13 @@ class Settings(BaseSettings):
     PROVIDER_TIMEOUT_SECONDS: float = Field(
         default=60.0, ge=1.0, le=600.0,
         alias="DEVPILOT_PROVIDER_TIMEOUT_SECONDS",
-        description="Per-call timeout applied around a provider request.",
+        description="Per-call timeout applied around a provider request. "
+                    "Default 60s is the cold-start-optimized value: it bounds "
+                    "how long a cold NVIDIA NIM pod (60-370s first call) "
+                    "delays a request before the router fails over to the "
+                    "sub-second backups (cloudflare llama-4-scout ~0.5s, "
+                    "ollama_cloud gemma4:31b ~0.75s). Raise it only to wait "
+                    "out a legit NVIDIA cold start instead of failing over.",
     )
     PROVIDER_RETRY_MAX: int = Field(
         default=2, ge=0, le=10,
@@ -423,6 +642,30 @@ class Settings(BaseSettings):
                 f"GEMINI_TIER must be 'free' or 'paid', got '{v}'"
             )
         return val
+
+    @field_validator("PROVIDER_DISABLED", mode="before")
+    @classmethod
+    def validate_provider_disabled(cls, v) -> List[str]:
+        """Accept a comma-separated env string or a JSON list of names.
+
+        Names are lower-cased and de-duplicated preserving first-seen order.
+        Empty entries are dropped; an unset value yields an empty list.
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            items = [m.strip().lower() for m in v.split(",") if m.strip()]
+        elif isinstance(v, (list, tuple)):
+            items = [str(m).strip().lower() for m in v if str(m).strip()]
+        else:
+            items = [str(v).strip().lower()]
+        seen: set = set()
+        out: List[str] = []
+        for m in items:
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
 
     @field_validator("GEMINI_PAID_MODELS", mode="before")
     @classmethod

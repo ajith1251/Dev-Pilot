@@ -26,15 +26,37 @@
 
 **Phase 20 — Cross-Repository Autonomous Runs (A1–A6)** ✅
 
+**NVIDIA NIM default provider (Session 42)** ✅
+
+_DevPilot now defaults to NVIDIA NIM: `DEVPILOT_LLM_PROVIDER=nvidia` with the
+priority chain `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai,
+anthropic, openrouter, ollama, openai_compatible, fake`.
+`app/llm/providers/nvidia.py` is a first-class OpenAI-compatible provider in
+the standard abstraction (no factory bypass, agents untouched) —
+`NVIDIA_API_KEY`, `NVIDIA_BASE_URL` (hosted NIM build or self-hosted
+microservice), `DEVPILOT_NVIDIA_MODEL` (default `meta/llama-3.1-8b-instruct` —
+plus per-request `DEVPILOT_NVIDIA_TIMEOUT_SECONDS` / `DEVPILOT_NVIDIA_MAX_RETRIES`.
+A missing key just reports the provider as not-configured and the router fails
+over to the next provider. Live-validated end-to-end (all five agent stages +
+streaming return correct real content; warm pod answers 2–8s). Note: hosted NIM
+cold-starts its inference pod on the first call after idle (60–370s) — the
+`.env` ships `DEVPILOT_PROVIDER_TIMEOUT_SECONDS=60` (cold-start-optimized), so
+the router fails over fast to the sub-second backups (cloudflare llama-4-scout
+~0.5s, ollama_cloud gemma4:31b ~0.75s) instead of waiting out the spin-up, and
+NVIDIA comes back automatically once its pod is warm. See
+`docs/MULTI_PROVIDER_ROUTING.md` §2.12._
+
+_Phase 20F (Multi-Provider Configuration & Backup Providers) adds a centralized provider registry — `app/llm/provider_registry.py` is the single place a provider is added (one `ProviderSpec` entry + a config block in `app/config.py` + a `BaseLLMProvider` implementation; `LLMFactory` and `ProviderRouter` derive their registration/availability/canonical order from it automatically). 11 providers are registered in canonical order `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai, anthropic, openrouter, ollama, openai_compatible, fake`. Four backup providers are thin OpenAI-compatible wrappers (no provider-specific agent/router code): `cloudflare` (Workers AI — `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID`, default model `@cf/meta/llama-4-scout-17b-16e-instruct` — live-verified fastest Workers AI model at ~0.5s TTF, chosen to minimize failover cold-start latency; the 2024-era `@cf/meta/llama-3.1-8b-instruct` was deprecated 2026-05-30 → 410), `ollama_cloud` (hosted Ollama — `OLLAMA_CLOUD_API_KEY`, default `gemma4:31b`, live-verified reliable even at small `max_tokens`; gpt-oss/nemotron models return empty content at `max_tokens<64`), `opencode_zen` (OpenAI-compatible gateway — `OPENCODE_ZEN_API_KEY`, default `deepseek-v4-flash-free`, free-tier ids end `-free`) and `openai_compatible` (any OpenAI chat-completions endpoint — vLLM/TGI/llama.cpp/LM Studio/remote Ollama — via `OPENAI_COMPATIBLE_BASE_URL`). NVIDIA stays primary; Gemini/OpenRouter/Cloudflare/Ollama Cloud/OpenCode Zen/generic serve as backups through the existing health-aware router. `DEVPILOT_PROVIDER_DISABLED` excludes a provider from routing without deleting its key (keeps configured/health metadata, reports `enabled=false`); from `.env` it must be a JSON array (`DEVPILOT_PROVIDER_DISABLED=["anthropic","openai"]`) because list fields decode as JSON before validators. Per-provider timeouts/retries via `DEVPILOT_CLOUDFLARE/OLLAMA_CLOUD/OPENCODE_ZEN/OPENAI_COMPATIBLE_TIMEOUT_SECONDS/_MAX_RETRIES`. All three new backups live-validated end-to-end through the real router (cloudflare → ollama_cloud → opencode_zen each route correctly). Full deterministic suite **1786 passed / 17 skipped / 2 failed (both pre-existing)**, 54 integration deselected. See `docs/MULTI_PROVIDER_ROUTING.md` §2.1/§2.13 and `workflow-status/MULTI_PROVIDER_CONFIG_COMPLETION_REPORT.md`._
+
 _Phase 20 makes the execution pipeline multi-repository aware: `RunSource.repositories` + `repo_patches` (A1), auxiliary repositories materialized + linked through the org graph (`_materialize_auxiliary_repositories`, A2), org-scope planning context for explicitly multi-repo runs (A3), and deterministic per-repo scope enforcement (A4) — a new `RepositoryScopeRegistry` + `SafePatchEngine.check_repository_ownership` gate + blocking `DET-020` review finding guarantee a patch is validated and applied against ITS OWN checkout only, never cross-checkout. Per-repo EKG ingestion (A5) lands each patch's evidence in its own repository namespace (`OrganizationKnowledgeGraphService.record_run_across_namespaces`: RUN/REPOSITORY/PATCH/FILE nodes + REFERENCES/MODIFIES edges, `RepositoryPatchResult.changed_files`) and links the run across namespaces via org-level RUN→REPO edges. The dashboard surfaces the whole vertical (A6): the run form has an auxiliary-repository editor (local path or github owner/repo/ref) and `GET /api/v1/runs/{id}` + the run-detail page expose `auxiliary_repositories` + per-repo `repo_validation` (status/changes/changed_files). Wired end-to-end: `POST /api/v1/runs` `repositories`/`repo_patches`, CLI `--aux-repo ID=PATH` + `--repo-patch ID=WORKSPACE=PATCH_JSON`, result `repo_validation`, autonomy `repository_validation` evidence. Demos A–G in `scripts/demo_phase20.py` all pass. See `workflow-status/PHASE20_ROADMAP.md`._
 
 _Phase 20B (production reliability) B2 adds typed per-capability provider fallback chains: `DEVPILOT_LLM_PROVIDER_FALLBACKS` (`cap:prov1,prov2;cap2:prov3`) lets each agent stage route through its OWN provider list — coding → `gemini,openai`, planning → `anthropic,gemini`, etc. — carried on `LLMConfig.capability` (`analysis|planning|coding|testing|review|reasoning|general`) and enforced by `ProviderRouter` (a configured capability chain is authoritative, never leaking into the global priority; providers referenced only in a chain are still health/circuit monitored). `GET /api/v1/providers/config` + CLI expose `provider_fallbacks`. See `docs/MULTI_PROVIDER_ROUTING.md` §2.7._ _Phase 20B B3 adds mid-stream token-loss failover: a `chat_stream` that drops AFTER delivering tokens resumes on the next provider with the partial output injected as continuation context (`<partial>…</partial>` + do-not-repeat), so the response continues instead of restarting — no duplicated tokens, no lost generation. Bounded per call by `DEVPILOT_PROVIDER_STREAM_RESUME_MAX` (default 3; `0` disables); hand-offs surface as `resumes` in provider/metrics snapshots. See §2.8._ _Phase 20B B1 adds a paid Gemini tier (production path): attach billing to the existing AI Studio `GEMINI_API_KEY` (same key format) and flip `DEVPILOT_GEMINI_TIER=paid` — the free-tier daily-quota cross-model failover + 24h exhaustion markers are disabled, a genuine quota/billing error fails fast with a clear "check your plan and billing" message while transient 429s still retry, and an optional `DEVPILOT_GEMINI_PAID_MODELS` list pins the paid model pool (first = default). `POST /api/v1/providers/test` returns `gemini_tier`/`gemini_models` for a paid-key self-check; `GET /api/v1/providers/config` exposes `data.gemini.{tier,paid_models}`. See `docs/MULTI_PROVIDER_ROUTING.md` §2.9 and `docs/GEMINI_API_KEY_REPORT.md` §7.1._
 
-_DevPilot now routes every LLM call through a health-aware `ProviderRouter`: deterministic priority chains (`[DEVPILOT_LLM_PROVIDER]` + `gemini, openai, anthropic, openrouter, ollama, fake`), per-provider circuit breakers, bounded retry with exponential backoff, quota-aware failure classification (permanent quota exhaustion fails over immediately), streaming failover before the first token, rolling health windows, a fully redacted config surface, PG-persisted metric snapshots (migration `014`), `/api/v1/providers` observability + CLI commands, a new dashboard "Providers" page, and two new first-class providers (`openrouter`, keyless `ollama`). Agents are untouched — the router wraps `llm_factory.get_provider()` behind a `RoutedProvider` facade._
+_DevPilot now routes every LLM call through a health-aware `ProviderRouter`: deterministic priority chains (`[DEVPILOT_LLM_PROVIDER]` + `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai, anthropic, openrouter, ollama, openai_compatible, fake`), per-provider circuit breakers, bounded retry with exponential backoff, quota-aware failure classification (permanent quota exhaustion fails over immediately), streaming failover before the first token, rolling health windows, a fully redacted config surface, PG-persisted metric snapshots (migration `014`), `/api/v1/providers` observability + CLI commands, a new dashboard "Providers" page, and first-class providers (`nvidia`, `cloudflare`, `ollama_cloud`, `opencode_zen`, `openai_compatible`, `openrouter`, keyless `ollama`). Agents are untouched — the router wraps `llm_factory.get_provider()` behind a `RoutedProvider` facade._
 
 _Phase 19C part 2 (Interactive EKG Visualization) replaced the custom SVG canvas on `/dashboard/engineering-graph` with a production graph engine (`@xyflow/react` React Flow v12 + d3-force used only as a seeded, deterministic layout algorithm): incremental neighborhood expansion with cached positions, node/relationship/repository filtering + text search, jump-to-node/repo, a live `WS /api/v1/ws/graph` badge (`snapshot` + `version_incremented` broadcasts with backoff reconnects), a graph timeline with `GET /api/v1/graph/diff` change-sets (added/removed nodes, changed edges, per-version), an evidence-only provenance panel, and 3000-node performance bounds. 29 new frontend vitest tests + backend diff/WS test suites; demo A–F in `scripts/demo_phase19c.py` all pass. See `docs/GRAPH_VISUALIZATION.md`._
 
-_DevPilot now routes every LLM call through a health-aware `ProviderRouter`: deterministic priority chains (`[DEVPILOT_LLM_PROVIDER]` + `gemini, openai, anthropic, openrouter, ollama, fake`), per-provider circuit breakers, bounded retry with exponential backoff, quota-aware failure classification (permanent quota exhaustion fails over immediately), streaming failover before the first token, rolling health windows, a fully redacted config surface, PG-persisted metric snapshots (migration `014`), `/api/v1/providers` observability + CLI commands, a new dashboard "Providers" page, and two new first-class providers (`openrouter`, keyless `ollama`). Agents are untouched — the router wraps `llm_factory.get_provider()` behind a `RoutedProvider` facade._
+_DevPilot now routes every LLM call through a health-aware `ProviderRouter`: deterministic priority chains (`[DEVPILOT_LLM_PROVIDER]` + `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen, openai, anthropic, openrouter, ollama, openai_compatible, fake`), per-provider circuit breakers, bounded retry with exponential backoff, quota-aware failure classification (permanent quota exhaustion fails over immediately), streaming failover before the first token, rolling health windows, a fully redacted config surface, PG-persisted metric snapshots (migration `014`), `/api/v1/providers` observability + CLI commands, a new dashboard "Providers" page, and first-class providers (`nvidia`, `cloudflare`, `ollama_cloud`, `opencode_zen`, `openai_compatible`, `openrouter`, keyless `ollama`). Agents are untouched — the router wraps `llm_factory.get_provider()` behind a `RoutedProvider` facade._
 
 _Phase 18 (Engineering Knowledge Graph) built one unified, temporal, provenance-bearing retrieval layer above code, requirements, goals, plans, evidence, consensus, notebook, memory, and runs: the EKG answers "why was this implemented?", "which repair fixed this?", and "which decision caused this architecture?". Graph versioning is incremental (never a full rebuild), retrieval is planner-driven (deterministic intent classification), every node retains its evidence origins, and the whole layer is exposed evidence-only via PostgreSQL persistence, API, CLI, and a dashboard graph explorer._
 
@@ -149,7 +171,7 @@ Every agent has **reasoning authority only**. No agent directly writes files or 
 
 ### Key Design Principles
 
-- **Provider-independent LLM abstraction** — swap OpenAI, Anthropic, or local models
+- **Provider-independent LLM abstraction** — swap NVIDIA NIM, OpenAI, Anthropic, or local models
 - **Deterministic security first** — LLMs propose, deterministic gates dispose
 - **Bounded loops** — every iterative process has strict attempt limits
 - **Deterministic quality gate** — LLM cannot override hard rejection rules
@@ -162,7 +184,7 @@ Every agent has **reasoning authority only**. No agent directly writes files or 
 | Layer | Technology |
 |-------|-----------|
 | **Backend** | Python 3.10+, FastAPI, Uvicorn |
-| **LLM Interface** | Provider-independent abstraction (OpenAI, Anthropic, extensible) |
+| **LLM Interface** | Provider-independent abstraction (NVIDIA NIM, OpenAI, Anthropic, Gemini, OpenRouter, Ollama) |
 | **Frontend** | Next.js 14, TypeScript, Tailwind CSS |
 | **Database** | PostgreSQL 18, SQLAlchemy 2.x (async), asyncpg |
 | **GitHub Integration** | GitHub REST API v3 |
@@ -267,9 +289,10 @@ deterministic demo (`python scripts/demo_phase17.py`). To run the real
 ```bash
 cd DevPilot/backend
 # 1. Set the provider + key in .env (never commit the key)
-#    DEVPILOT_LLM_PROVIDER=openai    (or anthropic, or gemini — free tier)
-#    OPENAI_API_KEY=sk-...           (or ANTHROPIC_API_KEY=..., GEMINI_API_KEY=...)
-#    Get a FREE Gemini key at https://aistudio.google.com/apikey
+#    DEVPILOT_LLM_PROVIDER=nvidia   (default; or gemini, openai, anthropic…)
+#    NVIDIA_API_KEY=nvapi-...       (or GEMINI_API_KEY=..., OPENAI_API_KEY=...)
+#    Get a NVIDIA NIM key at https://build.nvidia.com
+#    (FREE Gemini key: https://aistudio.google.com/apikey)
 # 2. Ensure a test-named DB is reachable (docker compose up -d)
 # 3. Run the live demo — it prints the same consensus/contradiction/notebook
 #    summaries from real provider content

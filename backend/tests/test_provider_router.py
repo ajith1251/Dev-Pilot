@@ -104,6 +104,7 @@ def _make_settings(**overrides) -> SimpleNamespace:
         ANTHROPIC_API_KEY="ak-test",
         GEMINI_API_KEY="gk-test",
         OPENROUTER_API_KEY="or-test",
+        NVIDIA_API_KEY="nv-test",
         OLLAMA_BASE_URL="http://localhost:11434",
     )
     defaults.update(overrides)
@@ -287,7 +288,7 @@ class TestRouterBasicRouting:
     async def test_no_providers_configured_raises(self) -> None:
         settings = _make_settings(
             OPENAI_API_KEY="", ANTHROPIC_API_KEY="", GEMINI_API_KEY="",
-            OPENROUTER_API_KEY="", OLLAMA_BASE_URL="",
+            OPENROUTER_API_KEY="", NVIDIA_API_KEY="", OLLAMA_BASE_URL="",
         )
         r = self._router(settings=settings, providers={})
         with pytest.raises(ProviderNotAvailableError):
@@ -928,7 +929,9 @@ class TestFactoryRoutingWiring:
         from app.config import settings
         from app.llm.factory import factory
 
-        with patch.object(settings, "PROVIDER_ROUTING_ENABLED", False):
+        with patch.object(settings, "PROVIDER_ROUTING_ENABLED", False), patch.object(
+            settings, "LLM_PROVIDER", "fake"
+        ):
             provider = factory.get_provider(None)
             assert not isinstance(provider, RoutedProvider)
             assert provider.provider_name == settings.LLM_PROVIDER
@@ -938,6 +941,11 @@ class TestFactoryRoutingWiring:
 
         assert "ollama" in factory._providers
         assert "openrouter" in factory._providers
+
+    def test_nvidia_registered(self) -> None:
+        from app.llm.factory import factory
+
+        assert "nvidia" in factory._providers
 
 
 class TestNewProviderConfig:
@@ -949,6 +957,26 @@ class TestNewProviderConfig:
             provider = OllamaProvider()
             assert provider.provider_name == "ollama"
             assert provider.default_model
+
+    def test_nvidia_requires_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        with patch.object(settings, "NVIDIA_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                NvidiaProvider()
+
+    def test_nvidia_configured_in_default_priority(self) -> None:
+        """nvidia is first in the canonical order (NIM is the default provider)."""
+        settings = _make_settings(LLM_PROVIDER="nvidia")
+        r = ProviderRouter(settings=settings, factory=_StubFactory({}))
+        assert r._priority()[0] == "nvidia"
+        assert r._priority()[:6] == [
+            "nvidia", "gemini", "cloudflare", "ollama_cloud",
+            "opencode_zen", "openai",
+        ]
+        assert r._priority()[-1] == "fake"
 
     def test_ollama_resolves_model_sentinel_to_local_model(self) -> None:
         """LLMConfig() defaults to the OpenAI sentinel — Ollama must use its
@@ -971,6 +999,155 @@ class TestNewProviderConfig:
         with patch.object(settings, "OPENROUTER_API_KEY", None):
             with pytest.raises(LLMConfigurationError):
                 OpenRouterProvider()
+
+
+class TestPhase20FProviders:
+    """Cloudflare + generic OpenAI-compatible providers (Phase 20F)."""
+
+    def _router(self, settings=None, providers=None) -> ProviderRouter:
+        settings = settings or _make_settings()
+        providers = providers or {}
+        return ProviderRouter(
+            factory=_StubFactory(providers),
+            settings=settings,
+            sleep=asyncio.sleep,
+        )
+
+    def test_cloudflare_and_openai_compatible_registered(self) -> None:
+        settings = _make_settings(CLOUDFLARE_API_KEY="cf-test")
+        r = self._router(settings=settings, providers={})
+        names = [e.name for e in r.entries]
+        assert "cloudflare" in names
+        assert "openai_compatible" in names
+        snap = r.health_snapshot()
+        assert any(p["name"] == "cloudflare" for p in snap["providers"])
+        assert any(p["name"] == "openai_compatible" for p in snap["providers"])
+
+    def test_ollama_cloud_and_opencode_zen_registered(self) -> None:
+        r = self._router(
+            settings=_make_settings(
+                OLLAMA_CLOUD_API_KEY="oc-test",
+                OPENCODE_ZEN_API_KEY="oz-test",
+            ),
+            providers={},
+        )
+        names = [e.name for e in r.entries]
+        assert "ollama_cloud" in names
+        assert "opencode_zen" in names
+        snap = r.health_snapshot()
+        assert any(p["name"] == "ollama_cloud" for p in snap["providers"])
+        assert any(p["name"] == "opencode_zen" for p in snap["providers"])
+        cfg = r.config_snapshot()
+        assert cfg["providers"]["ollama_cloud"]["configured"] is True
+        assert cfg["providers"]["ollama_cloud"]["key"].startswith("***")
+        assert cfg["providers"]["opencode_zen"]["configured"] is True
+        assert cfg["providers"]["opencode_zen"]["key"].startswith("***")
+
+    def test_ollama_cloud_requires_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        with patch.object(settings, "OLLAMA_CLOUD_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                OllamaCloudProvider()
+
+    def test_opencode_zen_requires_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        with patch.object(settings, "OPENCODE_ZEN_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                OpencodeZenProvider()
+
+    def test_cloudflare_requires_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                CloudflareProvider()
+
+    def test_openai_compatible_requires_base_url(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL", None):
+            with pytest.raises(LLMConfigurationError):
+                OpenAICompatibleProvider()
+
+    def test_config_snapshot_exposes_cloudflare_and_generic(self) -> None:
+        r = self._router(settings=_make_settings(CLOUDFLARE_API_KEY="cf-test"))
+        cfg = r.config_snapshot()
+        assert cfg["providers"]["cloudflare"]["configured"] is True
+        assert cfg["providers"]["cloudflare"]["key"].startswith("***")
+        assert cfg["providers"]["openai_compatible"]["configured"] is False
+        assert cfg["providers"]["openai_compatible"]["key"] == "<not set>"
+
+
+class TestProviderDisable:
+    """DEVPILOT_PROVIDER_DISABLED — exclude providers without deleting keys."""
+
+    def _router(self, settings=None, providers=None) -> ProviderRouter:
+        settings = settings or _make_settings()
+        providers = providers or {}
+        return ProviderRouter(
+            factory=_StubFactory(providers),
+            settings=settings,
+            sleep=asyncio.sleep,
+        )
+
+    @pytest.mark.asyncio
+    async def test_disabled_provider_is_skipped(self) -> None:
+        settings = _make_settings(
+            PROVIDER_PRIORITY=["openai", "gemini"],
+            PROVIDER_DISABLED=["openai"],
+        )
+        r = self._router(
+            settings=settings,
+            providers={"openai": _StubProvider("openai"), "gemini": _StubProvider("gemini")},
+        )
+        result = await r.chat(_msg())
+        assert result.content == "reply-gemini"
+        assert r.active_provider == "gemini"
+
+    @pytest.mark.asyncio
+    async def test_only_disabled_provider_raises(self) -> None:
+        settings = _make_settings(
+            PROVIDER_PRIORITY=["openai"],
+            PROVIDER_DISABLED=["openai"],
+        )
+        r = self._router(settings=settings, providers={"openai": _StubProvider("openai")})
+        with pytest.raises(ProviderNotAvailableError):
+            await r.chat(_msg())
+
+    def test_disabled_provider_keeps_config_but_disables(self) -> None:
+        r = self._router(
+            settings=_make_settings(PROVIDER_DISABLED=["openai"]),
+            providers={"openai": _StubProvider("openai")},
+        )
+        snap = r.health_snapshot()
+        openai = next(p for p in snap["providers"] if p["name"] == "openai")
+        assert openai["configured"] is True
+        assert openai["enabled"] is False
+
+    def test_config_snapshot_exposes_disabled(self) -> None:
+        r = self._router(settings=_make_settings(PROVIDER_DISABLED=["openai"]))
+        cfg = r.config_snapshot()
+        assert cfg["providers"]["openai"]["disabled"] is True
+        assert cfg["providers"]["gemini"]["disabled"] is False
+
+    def test_provider_disabled_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_PROVIDER_DISABLED="anthropic,OpenAI")
+        assert s.PROVIDER_DISABLED == ["anthropic", "openai"]
+        assert Settings(DEVPILOT_PROVIDER_DISABLED=["anthropic"]).PROVIDER_DISABLED == ["anthropic"]
+        assert Settings(DEVPILOT_PROVIDER_DISABLED="").PROVIDER_DISABLED == []
+        assert Settings(DEVPILOT_PROVIDER_DISABLED=None).PROVIDER_DISABLED == []
 
 
 class TestMetricsPersistenceDisabled:
@@ -1024,7 +1201,7 @@ class TestProviderApi:
         assert resp.status_code == 200
         blob = str(resp.json())
         for attr in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-                     "OPENROUTER_API_KEY"):
+                     "OPENROUTER_API_KEY", "NVIDIA_API_KEY"):
             key = getattr(self._settings(), attr)
             if key:
                 assert key not in blob

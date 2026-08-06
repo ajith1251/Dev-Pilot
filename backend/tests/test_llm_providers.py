@@ -17,6 +17,10 @@ class TestFactoryRegistry:
         assert "openai" in factory._providers
         assert "anthropic" in factory._providers
         assert "gemini" in factory._providers
+        assert "openrouter" in factory._providers
+        assert "nvidia" in factory._providers
+        assert "cloudflare" in factory._providers
+        assert "openai_compatible" in factory._providers
         assert "fake" in factory._providers
 
     def test_factory_can_instantiate_fake(self) -> None:
@@ -52,6 +56,13 @@ class TestFactoryRegistry:
         fresh = LLMFactory()
         fresh.register_provider("dummy", Dummy)
         assert "dummy" in fresh._providers
+        # The factory forwards runtime registrations to the centralized
+        # provider registry — undo that so later tests keep the canonical set.
+        from app.llm import provider_registry as reg
+
+        reg._PROVIDER_SPECS.pop("dummy", None)
+        if "dummy" in reg._PROVIDER_ORDER:
+            reg._PROVIDER_ORDER.remove("dummy")
 
 
 class TestFakeProvider:
@@ -696,5 +707,749 @@ class TestOpenRouterProvider:
         assert call is not None
         kwargs = call.kwargs
         assert kwargs["model"] == "poolside/laguna-s-2.1:free"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+
+
+class TestNvidiaProvider:
+    """NVIDIA NIM provider — OpenAI-compatible endpoint, config, streaming."""
+
+    def test_requires_api_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        with patch.object(settings, "NVIDIA_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                NvidiaProvider()
+
+    def test_default_model_uses_configured_nvidia_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        provider = NvidiaProvider.__new__(NvidiaProvider)
+        with patch.object(settings, "NVIDIA_MODEL",
+                          "deepseek-ai/deepseek-r1"):
+            assert provider.default_model == "deepseek-ai/deepseek-r1"
+
+    def test_default_model_falls_back_to_hosted_default(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        provider = NvidiaProvider.__new__(NvidiaProvider)
+        with patch.object(settings, "NVIDIA_MODEL", None):
+            assert provider.default_model == "meta/llama-3.1-8b-instruct"
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        provider = NvidiaProvider.__new__(NvidiaProvider)
+        with patch.object(settings, "NVIDIA_MODEL",
+                          "meta/llama-3.1-8b-instruct"):
+            # LLMConfig() defaults to "gpt-4o-mini" — treated as "unset"
+            assert provider._resolve_model(
+                LLMConfig()) == "meta/llama-3.1-8b-instruct"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "meta/llama-3.1-8b-instruct"
+            # an explicit NIM model is honored
+            assert provider._resolve_model(
+                LLMConfig(model="nvidia/llama-3.3-nemotron-super-49b-v1")
+            ) == "nvidia/llama-3.3-nemotron-super-49b-v1"
+
+    def test_client_gets_timeout_and_retries(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "NVIDIA_API_KEY", "nv-test-key"), patch(
+            "app.llm.providers.nvidia.AsyncOpenAI"
+        ) as mock_client_cls:
+            mock_client_cls.return_value = fake_client
+            NvidiaProvider()
+        call = mock_client_cls.call_args  # AsyncOpenAI(...)
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["api_key"] == "nv-test-key"
+        assert kwargs["base_url"] == "https://integrate.api.nvidia.com/v1"
+        assert kwargs["timeout"] == 300.0
+        assert kwargs["max_retries"] == 2
+
+    def test_nvidia_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_NVIDIA_MODEL="nvidia/llama-3.3-70b-instruct",
+            DEVPILOT_NVIDIA_TIMEOUT_SECONDS="45",
+            DEVPILOT_NVIDIA_MAX_RETRIES="3",
+        )
+        assert s.NVIDIA_MODEL == "nvidia/llama-3.3-70b-instruct"
+        assert s.NVIDIA_TIMEOUT_SECONDS == 45.0
+        assert s.NVIDIA_MAX_RETRIES == 3
+        assert Settings(DEVPILOT_NVIDIA_MODEL=None).NVIDIA_MODEL is None
+        assert s.NVIDIA_BASE_URL == "https://integrate.api.nvidia.com/v1"
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from nim"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=fake_response)
+
+        with patch.object(settings, "NVIDIA_API_KEY", "nv-test-key"), patch.object(
+            settings, "NVIDIA_MODEL", "nvidia/llama-3.3-70b-instruct"
+        ), patch("app.llm.providers.nvidia.AsyncOpenAI",
+                 return_value=fake_client):
+            provider = NvidiaProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from nim"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "nvidia/llama-3.3-70b-instruct"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
+    async def test_chat_wraps_errors(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMError
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("boom"))
+
+        with patch.object(settings, "NVIDIA_API_KEY", "nv-test-key"), patch(
+            "app.llm.providers.nvidia.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = NvidiaProvider()
+            with pytest.raises(LLMError, match="NVIDIA chat call failed"):
+                await provider.chat([LLMMessage(role="user", content="hi")])
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_yields_deltas(self) -> None:
+        from app.config import settings
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        async def _stream():
+            for text in ("hello", " ", "nim"):
+                chunk = MagicMock()
+                delta = MagicMock()
+                delta.content = text
+                chunk.choices = [MagicMock(delta=delta)]
+                yield chunk
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=_stream())
+
+        with patch.object(settings, "NVIDIA_API_KEY", "nv-test-key"), patch(
+            "app.llm.providers.nvidia.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = NvidiaProvider()
+            parts = [c async for c in provider.chat_stream(
+                [LLMMessage(role="user", content="hi")])]
+
+        assert parts == ["hello", " ", "nim"]
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        assert call.kwargs["stream"] is True
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_wraps_errors(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMError
+        from app.llm.providers.nvidia import NvidiaProvider
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("stream boom"))
+
+        with patch.object(settings, "NVIDIA_API_KEY", "nv-test-key"), patch(
+            "app.llm.providers.nvidia.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = NvidiaProvider()
+            with pytest.raises(LLMError, match="NVIDIA stream call failed"):
+                async for _ in provider.chat_stream(
+                        [LLMMessage(role="user", content="hi")]):
+                    pass
+
+
+class TestCloudflareProvider:
+    """Cloudflare Workers AI provider — OpenAI-compatible endpoint, config."""
+
+    def test_requires_api_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                CloudflareProvider()
+
+    def test_default_model_uses_configured_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        provider = CloudflareProvider.__new__(CloudflareProvider)
+        with patch.object(settings, "CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"):
+            assert provider.default_model == "@cf/meta/llama-3.1-8b-instruct"
+
+    def test_default_model_falls_back(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        provider = CloudflareProvider.__new__(CloudflareProvider)
+        with patch.object(settings, "CLOUDFLARE_MODEL", None):
+            assert provider.default_model == "@cf/meta/llama-4-scout-17b-16e-instruct"
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        provider = CloudflareProvider.__new__(CloudflareProvider)
+        with patch.object(settings, "CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"):
+            assert provider._resolve_model(
+                LLMConfig()) == "@cf/meta/llama-3.1-8b-instruct"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "@cf/meta/llama-3.1-8b-instruct"
+            assert provider._resolve_model(
+                LLMConfig(model="@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+            ) == "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+    def test_client_gets_timeout_and_retries(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "CLOUDFLARE_API_KEY", "cf-test-key"), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"
+        ), patch("app.llm.providers.cloudflare.AsyncOpenAI"
+                 ) as mock_client_cls:
+            mock_client_cls.return_value = fake_client
+            CloudflareProvider()
+        call = mock_client_cls.call_args  # AsyncOpenAI(...)
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["api_key"] == "cf-test-key"
+        assert kwargs["base_url"] == (
+            "https://api.cloudflare.com/client/v4/accounts/acc-123/ai/v1"
+        )
+        assert kwargs["timeout"] == 60.0
+        assert kwargs["max_retries"] == 2
+
+    def test_client_builds_url_from_account_id(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        with patch.object(settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"):
+            assert CloudflareProvider._resolve_base_url() == (
+                "https://api.cloudflare.com/client/v4/accounts/acc-123/ai/v1"
+            )
+
+    def test_client_uses_explicit_base_url(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        with patch.object(
+            settings, "CLOUDFLARE_BASE_URL", "https://example.com/v1"
+        ), patch.object(settings, "CLOUDFLARE_ACCOUNT_ID", None):
+            assert CloudflareProvider._resolve_base_url() == "https://example.com/v1"
+
+    def test_client_requires_account_id_without_base_url(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        with patch.object(settings, "CLOUDFLARE_BASE_URL", None), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", None
+        ):
+            with pytest.raises(LLMConfigurationError, match="CLOUDFLARE_ACCOUNT_ID"):
+                CloudflareProvider._resolve_base_url()
+
+    def test_cloudflare_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_CLOUDFLARE_MODEL="@cf/meta/llama-3.1-8b-instruct",
+            DEVPILOT_CLOUDFLARE_TIMEOUT_SECONDS="90",
+            DEVPILOT_CLOUDFLARE_MAX_RETRIES="3",
+        )
+        assert s.CLOUDFLARE_MODEL == "@cf/meta/llama-3.1-8b-instruct"
+        assert s.CLOUDFLARE_TIMEOUT_SECONDS == 90.0
+        assert s.CLOUDFLARE_MAX_RETRIES == 3
+        assert Settings(DEVPILOT_CLOUDFLARE_MODEL=None).CLOUDFLARE_MODEL is None
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from workers ai"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=fake_response)
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", "cf-test-key"), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"
+        ), patch.object(
+            settings, "CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"
+        ), patch("app.llm.providers.cloudflare.AsyncOpenAI",
+                return_value=fake_client):
+            provider = CloudflareProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from workers ai"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "@cf/meta/llama-3.1-8b-instruct"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
+    async def test_chat_wraps_errors(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMError
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("boom"))
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", "cf-test-key"), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"
+        ), patch(
+            "app.llm.providers.cloudflare.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = CloudflareProvider()
+            with pytest.raises(LLMError, match="Cloudflare chat call failed"):
+                await provider.chat([LLMMessage(role="user", content="hi")])
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_yields_deltas(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        async def _stream():
+            for text in ("hello", " ", "cf"):
+                chunk = MagicMock()
+                delta = MagicMock()
+                delta.content = text
+                chunk.choices = [MagicMock(delta=delta)]
+                yield chunk
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=_stream())
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", "cf-test-key"), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"
+        ), patch(
+            "app.llm.providers.cloudflare.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = CloudflareProvider()
+            parts = [c async for c in provider.chat_stream(
+                [LLMMessage(role="user", content="hi")])]
+
+        assert parts == ["hello", " ", "cf"]
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        assert call.kwargs["stream"] is True
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_skips_non_string_deltas(self) -> None:
+        from app.config import settings
+        from app.llm.providers.cloudflare import CloudflareProvider
+
+        async def _stream():
+            for text in ("provider", "-", 2, "ok", 4):
+                chunk = MagicMock()
+                delta = MagicMock()
+                delta.content = text
+                chunk.choices = [MagicMock(delta=delta)]
+                yield chunk
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=_stream())
+
+        with patch.object(settings, "CLOUDFLARE_API_KEY", "cf-test-key"), patch.object(
+            settings, "CLOUDFLARE_ACCOUNT_ID", "acc-123"
+        ), patch(
+            "app.llm.providers.cloudflare.AsyncOpenAI", return_value=fake_client
+        ):
+            provider = CloudflareProvider()
+            parts = [c async for c in provider.chat_stream(
+                [LLMMessage(role="user", content="hi")])]
+
+        assert parts == ["provider", "-", "ok"]
+
+
+class TestOpenAICompatibleProvider:
+    """Generic OpenAI-compatible endpoint provider — config + routing."""
+
+    def test_requires_base_url(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL", None):
+            with pytest.raises(LLMConfigurationError):
+                OpenAICompatibleProvider()
+
+    def test_default_model_uses_configured_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
+        with patch.object(settings, "OPENAI_COMPATIBLE_MODEL",
+                          "meta-llama/Meta-Llama-3.1-8B-Instruct"):
+            assert provider.default_model == "meta-llama/Meta-Llama-3.1-8B-Instruct"
+
+    def test_default_model_falls_back(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
+        with patch.object(settings, "OPENAI_COMPATIBLE_MODEL", None):
+            assert provider.default_model == LLMConfig().model
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
+        with patch.object(settings, "OPENAI_COMPATIBLE_MODEL",
+                          "meta-llama/Meta-Llama-3.1-8B-Instruct"):
+            assert provider._resolve_model(
+                LLMConfig()) == "meta-llama/Meta-Llama-3.1-8B-Instruct"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "meta-llama/Meta-Llama-3.1-8B-Instruct"
+            assert provider._resolve_model(
+                LLMConfig(model="phi-3-mini")) == "phi-3-mini"
+
+    def test_client_gets_timeout_retries_and_placeholder_key(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL",
+                          "http://localhost:8000/v1"), patch.object(
+            settings, "OPENAI_COMPATIBLE_API_KEY", None
+        ), patch("app.llm.providers.openai_compatible.AsyncOpenAI"
+                 ) as mock_client_cls:
+            mock_client_cls.return_value = fake_client
+            OpenAICompatibleProvider()
+        call = mock_client_cls.call_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["api_key"] == "openai-compatible"
+        assert kwargs["base_url"] == "http://localhost:8000/v1"
+        assert kwargs["timeout"] == 60.0
+        assert kwargs["max_retries"] == 2
+
+    def test_client_uses_configured_key(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL",
+                          "http://localhost:8000/v1"), patch.object(
+            settings, "OPENAI_COMPATIBLE_API_KEY", "secret-key"
+        ), patch("app.llm.providers.openai_compatible.AsyncOpenAI"
+                 ) as mock_client_cls:
+            mock_client_cls.return_value = fake_client
+            OpenAICompatibleProvider()
+        call = mock_client_cls.call_args
+        assert call is not None
+        assert call.kwargs["api_key"] == "secret-key"
+
+    def test_openai_compatible_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_OPENAI_COMPATIBLE_MODEL="phi-3-mini",
+            DEVPILOT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS="45",
+            DEVPILOT_OPENAI_COMPATIBLE_MAX_RETRIES="1",
+        )
+        assert s.OPENAI_COMPATIBLE_MODEL == "phi-3-mini"
+        assert s.OPENAI_COMPATIBLE_TIMEOUT_SECONDS == 45.0
+        assert s.OPENAI_COMPATIBLE_MAX_RETRIES == 1
+        assert Settings(DEVPILOT_OPENAI_COMPATIBLE_MODEL=None).OPENAI_COMPATIBLE_MODEL is None
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from vllm"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(
+            return_value=fake_response)
+
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL",
+                          "http://localhost:8000/v1"), patch.object(
+            settings, "OPENAI_COMPATIBLE_MODEL", "phi-3-mini"
+        ), patch("app.llm.providers.openai_compatible.AsyncOpenAI",
+                 return_value=fake_client):
+            provider = OpenAICompatibleProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from vllm"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "phi-3-mini"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
+    async def test_chat_wraps_errors(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMError
+        from app.llm.providers.openai_compatible import OpenAICompatibleProvider
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("boom"))
+
+        with patch.object(settings, "OPENAI_COMPATIBLE_BASE_URL",
+                          "http://localhost:8000/v1"), patch(
+            "app.llm.providers.openai_compatible.AsyncOpenAI",
+            return_value=fake_client,
+        ):
+            provider = OpenAICompatibleProvider()
+            with pytest.raises(LLMError, match="OpenAI-compatible chat call failed"):
+                await provider.chat([LLMMessage(role="user", content="hi")])
+
+
+class TestOllamaCloudProvider:
+    """Ollama Cloud provider — OpenAI-compatible remote inference, config."""
+
+    def test_requires_api_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        with patch.object(settings, "OLLAMA_CLOUD_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                OllamaCloudProvider()
+
+    def test_default_model_uses_configured_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        provider = OllamaCloudProvider.__new__(OllamaCloudProvider)
+        with patch.object(settings, "OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:preview"):
+            assert provider.default_model == "deepseek-v4-flash:preview"
+
+    def test_default_model_falls_back(self) -> None:
+        from app.config import settings
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        provider = OllamaCloudProvider.__new__(OllamaCloudProvider)
+        with patch.object(settings, "OLLAMA_CLOUD_MODEL", None):
+            assert provider.default_model == "gemma4:31b"
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        provider = OllamaCloudProvider.__new__(OllamaCloudProvider)
+        with patch.object(settings, "OLLAMA_CLOUD_MODEL", "gpt-oss:20b"):
+            assert provider._resolve_model(LLMConfig()) == "gpt-oss:20b"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "gpt-oss:20b"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-oss:120b")) == "gpt-oss:120b"
+
+    def test_client_uses_default_base_url_when_unset(self) -> None:
+        from app.config import settings
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "OLLAMA_CLOUD_API_KEY", "oc-test"), patch.object(
+            settings, "OLLAMA_CLOUD_BASE_URL", None
+        ), patch("app.llm.providers.ollama_cloud.AsyncOpenAI",
+                 return_value=fake_client) as mock_client_cls:
+            OllamaCloudProvider()
+        call = mock_client_cls.call_args
+        assert call is not None
+        assert call.kwargs["base_url"] == "https://ollama.com/v1"
+        assert call.kwargs["api_key"] == "oc-test"
+
+    def test_ollama_cloud_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_OLLAMA_CLOUD_MODEL="gpt-oss:120b",
+            DEVPILOT_OLLAMA_CLOUD_TIMEOUT_SECONDS="45",
+            DEVPILOT_OLLAMA_CLOUD_MAX_RETRIES="1",
+        )
+        assert s.OLLAMA_CLOUD_MODEL == "gpt-oss:120b"
+        assert s.OLLAMA_CLOUD_TIMEOUT_SECONDS == 45.0
+        assert s.OLLAMA_CLOUD_MAX_RETRIES == 1
+        assert Settings(DEVPILOT_OLLAMA_CLOUD_MODEL=None).OLLAMA_CLOUD_MODEL is None
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.ollama_cloud import OllamaCloudProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from ollama cloud"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(return_value=fake_response)
+
+        with patch.object(settings, "OLLAMA_CLOUD_API_KEY", "oc-test"), patch.object(
+            settings, "OLLAMA_CLOUD_MODEL", "gpt-oss:20b"
+        ), patch("app.llm.providers.ollama_cloud.AsyncOpenAI",
+                 return_value=fake_client):
+            provider = OllamaCloudProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from ollama cloud"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "gpt-oss:20b"
+        assert kwargs["temperature"] == 0.1
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+
+
+class TestOpencodeZenProvider:
+    """OpenCode Zen gateway provider — OpenAI-compatible, config."""
+
+    def test_requires_api_key(self) -> None:
+        from app.config import settings
+        from app.core.exceptions import LLMConfigurationError
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        with patch.object(settings, "OPENCODE_ZEN_API_KEY", None):
+            with pytest.raises(LLMConfigurationError):
+                OpencodeZenProvider()
+
+    def test_default_model_uses_configured_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        provider = OpencodeZenProvider.__new__(OpencodeZenProvider)
+        with patch.object(settings, "OPENCODE_ZEN_MODEL", "claude-sonnet-4-5"):
+            assert provider.default_model == "claude-sonnet-4-5"
+
+    def test_default_model_falls_back(self) -> None:
+        from app.config import settings
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        provider = OpencodeZenProvider.__new__(OpencodeZenProvider)
+        with patch.object(settings, "OPENCODE_ZEN_MODEL", None):
+            assert provider.default_model == "deepseek-v4-flash-free"
+
+    def test_resolve_model_ignores_openai_sentinel(self) -> None:
+        from app.config import settings
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        provider = OpencodeZenProvider.__new__(OpencodeZenProvider)
+        with patch.object(settings, "OPENCODE_ZEN_MODEL", "deepseek-v4-flash-free"):
+            assert provider._resolve_model(LLMConfig()) == "deepseek-v4-flash-free"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-4o-mini")) == "deepseek-v4-flash-free"
+            assert provider._resolve_model(
+                LLMConfig(model="gpt-5.2")) == "gpt-5.2"
+
+    def test_client_uses_default_base_url_when_unset(self) -> None:
+        from app.config import settings
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        fake_client = MagicMock()
+        with patch.object(settings, "OPENCODE_ZEN_API_KEY", "oz-test"), patch.object(
+            settings, "OPENCODE_ZEN_BASE_URL", None
+        ), patch("app.llm.providers.opencode_zen.AsyncOpenAI",
+                 return_value=fake_client) as mock_client_cls:
+            OpencodeZenProvider()
+        call = mock_client_cls.call_args
+        assert call is not None
+        assert call.kwargs["base_url"] == "https://opencode.ai/zen/v1"
+        assert call.kwargs["api_key"] == "oz-test"
+
+    def test_opencode_zen_config_parses(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            DEVPILOT_OPENCODE_ZEN_MODEL="gpt-5.2",
+            DEVPILOT_OPENCODE_ZEN_TIMEOUT_SECONDS="45",
+            DEVPILOT_OPENCODE_ZEN_MAX_RETRIES="1",
+        )
+        assert s.OPENCODE_ZEN_MODEL == "gpt-5.2"
+        assert s.OPENCODE_ZEN_TIMEOUT_SECONDS == 45.0
+        assert s.OPENCODE_ZEN_MAX_RETRIES == 1
+        assert Settings(DEVPILOT_OPENCODE_ZEN_MODEL=None).OPENCODE_ZEN_MODEL is None
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_resolved_model(self) -> None:
+        from app.config import settings
+        from app.llm.providers.opencode_zen import OpencodeZenProvider
+
+        fake_client = MagicMock()
+        fake_choice = MagicMock()
+        fake_choice.message.content = "hello from zen"
+        fake_choice.finish_reason = "stop"
+        fake_response = MagicMock()
+        fake_response.choices = [fake_choice]
+        fake_response.usage = None
+        fake_client.chat.completions.create = AsyncMock(return_value=fake_response)
+
+        with patch.object(settings, "OPENCODE_ZEN_API_KEY", "oz-test"), patch.object(
+            settings, "OPENCODE_ZEN_MODEL", "deepseek-v4-flash-free"
+        ), patch("app.llm.providers.opencode_zen.AsyncOpenAI",
+                 return_value=fake_client):
+            provider = OpencodeZenProvider()
+            result = await provider.chat(
+                [LLMMessage(role="user", content="hi")],
+                config=LLMConfig(temperature=0.1),
+            )
+
+        assert result.content == "hello from zen"
+        call = fake_client.chat.completions.create.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["model"] == "deepseek-v4-flash-free"
         assert kwargs["temperature"] == 0.1
         assert kwargs["messages"] == [{"role": "user", "content": "hi"}]

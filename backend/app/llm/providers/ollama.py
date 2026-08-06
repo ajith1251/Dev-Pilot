@@ -7,8 +7,9 @@ when OLLAMA_BASE_URL is configured.
 
 This is the reference for how a "future" provider is added:
 1. Implement BaseLLMProvider in app/llm/providers/.
-2. Register it in LLMFactory._providers.
-3. Add its availability check to ProviderRouter.
+2. Add its config block in app/config.py (key/base URL/model/timeout/retry).
+3. Register it in app/llm/provider_registry.py (the single registration
+   point — LLMFactory and ProviderRouter derive from it automatically).
 """
 
 from __future__ import annotations

@@ -20,25 +20,15 @@ from app.config import settings
 from app.core.exceptions import LLMProviderNotFound
 from app.core.logging import logger
 from app.llm.base import BaseLLMProvider
-from app.llm.providers.anthropic import AnthropicProvider
-from app.llm.providers.fake import FakeProvider
-from app.llm.providers.gemini import GeminiProvider
-from app.llm.providers.ollama import OllamaProvider
-from app.llm.providers.openai import OpenAIProvider
-from app.llm.providers.openrouter import OpenRouterProvider
+from app.llm.provider_registry import provider_classes
 
 
 class LLMFactory:
     """Factory that creates LLM provider instances by name."""
 
-    _providers: Dict[str, Type[BaseLLMProvider]] = {
-        "openai": OpenAIProvider,
-        "anthropic": AnthropicProvider,
-        "gemini": GeminiProvider,
-        "openrouter": OpenRouterProvider,
-        "ollama": OllamaProvider,
-        "fake": FakeProvider,
-    }
+    # Derived from the centralized provider registry (Phase 20F) — adding a
+    # provider to app/llm/provider_registry.py registers it here too.
+    _providers: Dict[str, Type[BaseLLMProvider]] = dict(provider_classes())
 
     def __init__(self) -> None:
         self._instances: Dict[str, BaseLLMProvider] = {}
@@ -48,11 +38,18 @@ class LLMFactory:
     ) -> None:
         """Register a new provider type.
 
+        Also registers the provider with the centralized registry so the
+        router can pick it up. Providers registered without an availability
+        attribute are treated as always-present so they can actually be used.
+
         Args:
             name: Identifier for the provider (e.g. 'ollama').
             provider_cls: The provider class.
         """
+        from app.llm.provider_registry import register_provider as _register
+
         self._providers[name] = provider_cls
+        _register(name, provider_cls, availability_attr="", always_available=True)
         logger.debug("Registered LLM provider: %s", name)
 
     def get_provider(self, name: Optional[str] = None) -> BaseLLMProvider:

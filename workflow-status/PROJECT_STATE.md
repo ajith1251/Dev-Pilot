@@ -1,8 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 6, 2026 (session 41 — workstream C live E2E re-run: infrastructure green, blocked on free-tier model)
+> **Last updated**: August 6, 2026 (session 43 — multi-provider configuration: centralized provider registry + Cloudflare & OpenAI-compatible backup providers)
 > **Current Phase**: Phase 20 COMPLETE ✅ — **Phase 20A6 full dashboard DONE Session 40**: the complete multi-repository user experience — `backend/app/services/run_dashboard.py` (repository-aware view builder: `build_repository_view` per-repo status cards + six-stage per-repo timeline, `build_organization_summary` org-level execution summary; duck-typed for `DevPilotRun` + `DevPilotRunResult`; evidence-only, run-scoped isolation), API/WS/CLI all consume the builders (`GET /runs/{id}` + `POST /runs` + WS broadcast carry `repositories` + `organization_summary`; run list `repository_count`; `POST /runs` accepts `acceptance_criteria` + `execution_budget`), org repositories search/filter/pagination + per-repo stats endpoint, `RepositorySelector`/`RepositoryStatusCards`/`RepositoryTimeline`/`OrganizationSummary`/`RunHistoryPanel` frontend components + `CreateRunModal` criteria/budget/ordering/relationships, **restart recovery** (PostgresRunStore round-trips `repository_path`/`auxiliary_repositories`/`repo_patches` so the dashboard rebuilds identically after restart), 25 new backend tests (`test_phase20a6_dashboard.py`) + 14 new frontend vitest — backend **1681 passed / 17 skipped / 1 pre-existing env failure**, frontend **63 passed**, `next build` EXIT=0, `demo_phase20.py` demos A–M ALL PASS (PG verified). Report: `PHASE20A6_COMPLETION_REPORT.md`. (Earlier in Phase 20: E DONE Session 38 unittest XML / Vitest JSON / Jest JSON parsers; B1 DONE Session 37 `DEVPILOT_GEMINI_TIER` paid tier; B2 DONE Session 34 typed per-capability fallback chains; B3 DONE Session 35 mid-stream token-loss failover; D DONE Session 36 org-graph UI parity; A1+A2 Session 28 commit `0954604`, A3 Session 29 `895dad5`, A4 Session 31 `e1fc08e`, A5 Session 32, A6 Session 33 run-detail surface). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
-> **Total tests**: **1681 passed / 17 skipped / 1 failed / 54 deselected (integration)** on the Session-40 deterministic run (`-m "not live and not integration"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **98 new backend tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), **A6 dashboard: 25 (`test_phase20a6_dashboard.py` — view builder both shapes, org summary, API sanitize/create/list, org repositories search/filter/pagination + per-repo stats, WS broadcast payload, CLI `--json`, PostgresRunStore A6 round-trip)**. Phase 20B: **29 new tests** — B1: 12, B2: 12, B3: 5 (`test_provider_router.py` now 60). Phase 20E: **12 new tests** in `test_testing.py`. Frontend vitest **63 passed (8 files)** (49 prior + 11 `repositoryStatusModel` mappers + 3 client additions). `scripts/demo_phase20.py` demos A–M ALL PASS.
+> **Total tests**: **1769 passed / 17 skipped / 2 failed / 54 deselected (integration)** on the Session-43 deterministic run (`-m "not live and not integration"`; the 2 failures are both pre-existing and unrelated: the `test_wrapper_skips_cleanly_without_provider` env quirk and the org-graph PG round-trip hitting the accumulated 64-repository org limit). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **98 new backend tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), **A6 dashboard: 25 (`test_phase20a6_dashboard.py` — view builder both shapes, org summary, API sanitize/create/list, org repositories search/filter/pagination + per-repo stats, WS broadcast payload, CLI `--json`, PostgresRunStore A6 round-trip)**. Phase 20B: **29 new tests** — B1: 12, B2: 12, B3: 5 (`test_provider_router.py` now 60). Phase 20E: **12 new tests** in `test_testing.py`. Phase 20F (Session 43): **7 new `test_provider_registry.py`** + Cloudflare/OpenAI-compatible provider tests in `test_llm_providers.py` + `TestPhase20FProviders`/`TestProviderDisable` in `test_provider_router.py`. Frontend vitest **63 passed (8 files)** (49 prior + 11 `repositoryStatusModel` mappers + 3 client additions). `scripts/demo_phase20.py` demos A–M ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
 > **Semantic EKG retrieval (Phase 19)**: KnowledgeQueryPlanner merges lexical + cosine retrieval over node payloads (deterministic hashed word/trigram provider, no API) within existing bounds; optional pgvector mirror via migration 012; demo G PASS in-memory + live-PG
 > **EKG-driven test selection (Phase 12d closure)**: smart test selection driven by graph evidence — `select_tests_for_changes()` walks patch → test impact edges (FILE ← MODIFIES ← PATCH → VALIDATED_BY → TEST_SUITE); orchestrator test stage targets pytest candidates with EKG-selected tests; autonomy replans query the EKG first (fallback to injected selector); lazy per-repo cache removed; demo H PASS in-memory + live-PG
@@ -2651,5 +2651,237 @@ and/or a `planner.py` JSON-repair fallback.
 configured; 2) start the enterprise roadmap workstream E1 (self-hosted inference
 fabric — `DEVPILOT_INFERENCE_MODE`, local vLLM/ollama backends) per
 `workflow-status/ENTERPRISE_ROADMAP.md`.
+
+### Session 42 (August 6, 2026) — NVIDIA NIM: First-Class Provider & Default ✅
+
+Added NVIDIA NIM as a first-class LLM provider (through the existing provider
+abstraction — no factory bypass, no agent changes) and made it the default
+provider.
+
+**Provider** — `backend/app/llm/providers/nvidia.py` (`NvidiaProvider`): a thin
+OpenAI-compatible wrapper over the same code path as OpenAI/OpenRouter, so every
+model a NIM endpoint serves works without provider-specific code. Registered in
+`LLMFactory._providers` as `nvidia`; availability + canonical order wired into
+`ProviderRouter` (`_PROVIDER_AVAILABILITY["nvidia"] = ("NVIDIA_API_KEY", False)`;
+`_CANONICAL_ORDER` now `nvidia, gemini, openai, anthropic, openrouter, ollama,
+fake`).
+
+**Config** (all env-driven, secret-safe): `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`
+(default `https://integrate.api.nvidia.com/v1` — hosted NIM build; point at a
+self-hosted NIM microservice for private deployments), `DEVPILOT_NVIDIA_MODEL`
+(default `meta/llama-3.1-8b-instruct`, independent of the OpenAI-biased
+`DEVPILOT_LLM_MODEL`), `DEVPILOT_NVIDIA_TIMEOUT_SECONDS` (default 300) and
+`DEVPILOT_NVIDIA_MAX_RETRIES` (default 2) passed to the OpenAI-compatible
+client. A missing key reports the provider as not-configured and the router
+fails over to the next provider — so the default `.env` keeps working.
+
+**Default** — `backend/.env` now sets `DEVPILOT_LLM_PROVIDER=nvidia` and
+`DEVPILOT_PROVIDER_PRIORITY=["nvidia","gemini","openai","anthropic",
+"openrouter","ollama","fake"]`. `.env.example` updated likewise (NVIDIA block
+added; `NVIDIA_API_KEY=` left commented until a key is available).
+
+**Tests** — `TestNvidiaProvider` (10 new in `test_llm_providers.py`: key
+requirement, default-model resolution, sentinel handling, client
+timeout/retries kwargs, config parsing, chat/stream + error paths) and
+`test_provider_router.py` (+4: factory registration, `NVIDIA_API_KEY` required,
+canonical-order priority, and `NVIDIA_API_KEY` added to `_make_settings`
+defaults, the no-providers-configured case, and the config-never-leaks-secrets
+check). **113 passed** across the two router/provider files; full deterministic
+suite **1732 passed / 17 skipped / 2 failed / 54 deselected** — the 2 failures
+are both pre-existing and unrelated to this change (the documented
+`test_wrapper_skips_cleanly_without_provider` env quirk, and an org-graph PG
+round-trip now hitting the accumulated 64-repository org limit — PG holds 63
+org repos from prior demo/test runs; verified it fails with this change
+reverted).
+
+**Verified (live)** — key set in `backend/.env` (git-ignored); `python -m app.cli
+providers` → `nvidia configured: True`; `python -m app.cli provider-test` →
+`Provider: nvidia` / `Response: provider-ok`. Live agent-stage validation
+(`analysis`/`planning`/`coding`/`testing`/`review`/`stream` via `RoutedProvider`
++ capability `LLMConfig`s) returns correct real content on NVIDIA when the hosted
+NIM pod is warm (2–8s). **Finding: hosted-NIM cold start** — the first call after
+idle takes **60–370s** to spin up the inference pod, which exceeded the initial
+120s router timeout (router retried → failed over to Gemini; circuit breaker
+correctly opened after 3 consecutive timeouts). Policy: `DEVPILOT_PROVIDER_TIMEOUT_SECONDS=240`
+in `.env` and `NVIDIA_TIMEOUT_SECONDS` default `300` (client ≥ router so bounded
+retry/failover is the effective policy); cold-start blowouts fail over and the
+request still completes. Correct default model verified against `GET /v1/models`
+(a `nvidia/llama-3.3-70b-instruct` does NOT exist; the real name is
+`meta/llama-3.3-70b-instruct`).
+
+**Model bake-off (live, 8 candidates):** winner = `meta/llama-3.1-8b-instruct`
+(0.5s TTF, clean JSON+code — now the default). `nvidia/nemotron-mini-4b-instruct`
+(0.5s) and `nvidia/llama-3.3-nemotron-super-49b-v1` (0.5s warm) are good
+backups; the 70B measured a 60s cold TTF; `nvidia/llama-3.1-nemotron-nano-8b-v1`
+timed out (>300s) on this key; gemma-3 4b/12b 404 and `openai/gpt-oss-20b`
+returned empty — not usable on this key. More free models can be added later as
+backups; NVIDIA stays the main priority.
+
+**Status** — working tree has this change + the uncommitted Session-41
+`json_repair.py` tree (NOT committed; user to review).
+
+**Next (Session 43):** 1) commit the Session-40 A6 tree + Session-42 NVIDIA
+change (user to review first); 2) run a full live run now that NVIDIA is warm /
+default (workstream C re-run; a warm pod answers 2–8s); 3) enterprise roadmap
+workstream E1.
+
+### Session 43 (August 6, 2026) — Multi-Provider Configuration: Centralized Registry + Backup Providers (Cloudflare / Ollama Cloud / OpenCode Zen) ✅
+
+"Multi-Provider Configuration & Backup Provider Integration": NVIDIA NIM stays
+the primary provider; Cloudflare Workers AI, Ollama Cloud, and OpenCode Zen are
+added as configured backup providers; provider registration is centralized
+into one registry; a `DEVPILOT_PROVIDER_DISABLED` kill-switch is added. No
+agent changes.
+
+**Centralized registry (Phase 20F)** — new `backend/app/llm/provider_registry.py`
+is the single registration source: `ProviderSpec` (name, class, availability
+attribute, always-present flag) + `register_provider`, `provider_names`,
+`provider_classes`, `provider_availability`, `get_spec`. `LLMFactory._providers
+= dict(provider_classes())`; `ProviderRouter._PROVIDER_AVAILABILITY =
+dict(provider_availability())`; `_CANONICAL_ORDER = provider_names()`. Adding a
+provider now = one `ProviderSpec` entry + a config block + a `BaseLLMProvider`
+implementation — no factory/router routing changes. `register_provider` forwards
+to the registry so runtime registration stays in sync. **11 built-ins registered
+in canonical order:** `nvidia, gemini, cloudflare, ollama_cloud, opencode_zen,
+openai, anthropic, openrouter, ollama, openai_compatible, fake` (the two new
+backups sit right after `cloudflare`, before `openai`).
+
+**Cloudflare provider** — `backend/app/llm/providers/cloudflare.py`
+(`CloudflareProvider`, OpenAI-compatible `chat`/`chat_stream`): `CLOUDFLARE_API_KEY`
+required; base URL auto-built from `CLOUDFLARE_ACCOUNT_ID` as
+`https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1`, or overridden by
+`CLOUDFLARE_BASE_URL` (missing both → `LLMConfigurationError`); the OpenAI
+sentinel `LLMConfig().model` is treated as unset in `_resolve_model`;
+`DEVPILOT_CLOUDFLARE_TIMEOUT_SECONDS` default 60.0 / `_MAX_RETRIES` default 2.
+**Default model is now `@cf/meta/llama-4-scout-17b-16e-instruct`** — live-verified
+fastest Workers AI model (~0.5s TTF, 17B MoE), chosen over
+`@cf/meta/llama-3.1-8b-instruct-fp8` (1.2–2.1s) to minimize failover cold-start
+latency; the 2024-era
+`@cf/meta/llama-3.1-8b-instruct` was deprecated by Cloudflare on 2026-05-30 and
+returns HTTP 410. Cloudflare's OpenAI-compat endpoint does not implement
+`GET /models` (405) — live validation probes with a chat call, not a model list.
+
+**Ollama Cloud provider** — `backend/app/llm/providers/ollama_cloud.py`
+(`OllamaCloudProvider`, OpenAI-compatible): hosted Ollama (GPU-only sizes
+without a local GPU) via `https://ollama.com/v1`; `OLLAMA_CLOUD_API_KEY`
+required (`LLMConfigurationError`); `DEVPILOT_OLLAMA_CLOUD_MODEL` override.
+**Default model `gemma4:31b`** — live-verified to return content even at
+`max_tokens=32` (3/3 trials); `gpt-oss:120b`/`gpt-oss:20b` and
+`nemotron-3-nano:30b` on this endpoint can return **empty content** at
+`max_tokens<64` (observed: `gpt-oss:120b` empty 2/3 at 32), so the default is
+the reliable model; subscription-only catalog models (`deepseek-v4-flash:preview`,
+`glm-5.1`, `kimi-*`, `minimax-m2.7`) return 403 from a free key.
+
+**OpenCode Zen provider** — `backend/app/llm/providers/opencode_zen.py`
+(`OpencodeZenProvider`, OpenAI-compatible): OpenAI-compatible gateway at
+`https://opencode.ai/zen/v1`; `OPENCODE_ZEN_API_KEY` required; free-tier model
+ids end in `-free`. **Default model `deepseek-v4-flash-free`** (verified OK);
+other verified free models: `big-pickle`, `north-mini-code-free`,
+`laguna-s-2.1-free`, `mimo-v2.5-free`, `ling-3.0-flash-free`,
+`nemotron-3-ultra-free`, `longcat-2.0-free` (61 models on the gateway).
+
+**Generic OpenAI-compatible provider** — `backend/app/llm/providers/openai_compatible.py`
+(`OpenAICompatibleProvider`): `OPENAI_COMPATIBLE_BASE_URL` required (any
+OpenAI chat-completions endpoint: vLLM/TGI/llama.cpp/LM Studio/remote Ollama);
+`OPENAI_COMPATIBLE_API_KEY` optional (placeholder `"openai-compatible"`);
+`DEVPILOT_OPENAI_COMPATIBLE_MODEL` defaults to `LLMConfig().model`;
+`_TIMEOUT_SECONDS` default 60.0 / `_MAX_RETRIES` default 2.
+
+**Kill-switch** — `DEVPILOT_PROVIDER_DISABLED` in `backend/app/config.py`,
+normalized by a new `validate_provider_disabled` validator (lower-case,
+dedupe). **Env note:** from `.env`/process env pydantic-settings decodes list
+fields as JSON **before** validators run, so `DEVPILOT_PROVIDER_DISABLED` must
+be a JSON array there (`["anthropic","openai"]`); the comma string only works
+programmatically (`Settings(DEVPILOT_PROVIDER_DISABLED="anthropic,openai")`).
+Disabled providers keep credentials/health but are excluded from routing:
+`_disabled_names()` + `enabled=name not in disabled` in `_build_entries`;
+`health_snapshot()` reports `enabled: false`; `config_snapshot()` gains a
+`"disabled"` bool per provider. Only-disabled → `ProviderNotAvailableError`.
+
+**Canonical order** — `_CANONICAL_ORDER = provider_names()` now
+`("nvidia","gemini","cloudflare","ollama_cloud","opencode_zen","openai",
+"anthropic","openrouter","ollama","openai_compatible","fake")`. With
+`DEVPILOT_LLM_PROVIDER=nvidia` the chain is exactly that;
+`test_nvidia_configured_in_default_priority` now asserts
+`[:6] == ["nvidia","gemini","cloudflare","ollama_cloud","opencode_zen",
+"openai"]`, `[-1] == "fake"`.
+
+**Config** — `backend/app/config.py`: Cloudflare block (`CLOUDFLARE_API_KEY`,
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_BASE_URL`, `CLOUDFLARE_MODEL`,
+`CLOUDFLARE_TIMEOUT_SECONDS`, `CLOUDFLARE_MAX_RETRIES`), Ollama Cloud block
+(`OLLAMA_CLOUD_API_KEY`/`_BASE_URL`/`OLLAMA_CLOUD_MODEL`/`_TIMEOUT_SECONDS`/
+`_MAX_RETRIES`), OpenCode Zen block (`OPENCODE_ZEN_API_KEY`/`_BASE_URL`/
+`OPENCODE_ZEN_MODEL`/`_TIMEOUT_SECONDS`/`_MAX_RETRIES`), OpenAI-compatible
+block (`OPENAI_COMPATIBLE_BASE_URL`/`_API_KEY`/`_MODEL`/`_TIMEOUT_SECONDS`/
+`_MAX_RETRIES`), `PROVIDER_DISABLED` + validator. `.env.example` updated with
+all four blocks + `DEVPILOT_PROVIDER_DISABLED` JSON-array examples +
+canonical-order comment. `backend/.env` (git-ignored) now carries the three new
+keys + priority chain `["nvidia","gemini","cloudflare","ollama_cloud",
+"opencode_zen","openai","anthropic","openrouter","ollama","fake"]`.
+
+**Tests** — `backend/tests/test_provider_registry.py` (new, 7 tests incl.
+registry↔factory sync + registered-entry cleanup; builtins list updated to 11
+with availability attrs); `test_llm_providers.py`
+(cloudflare + ollama_cloud + opencode_zen + openai_compatible provider classes
++ factory registration; `register_provider("dummy")` now unregisters from the
+shared registry); `test_provider_router.py` (`TestPhase20FProviders`,
+`TestProviderDisable`, canonical-order slice `[:6]`,
+`test_ollama_cloud_and_opencode_zen_registered`, key-required via
+`config_snapshot()`). Targeted suites: **167 passed**. Full deterministic suite
+(backup providers wired): **1786 passed / 17 skipped / 2 failed / 54
+deselected** — 17 new tests vs the 1769 baseline; the 2 failures are the two
+pre-existing, unrelated ones (the
+`test_wrapper_skips_cleanly_without_provider` env quirk and the org-graph PG
+round-trip hitting the accumulated 64-repository org limit).
+
+**Live validation (all three new backups, real keys)** — keys for
+Cloudflare/Ollama Cloud/OpenCode Zen were added to the git-ignored
+`backend/.env` and the failover chain verified end-to-end through the real
+router: `python -m app.cli provider-test --json` with
+`DEVPILOT_PROVIDER_DISABLED=["nvidia","gemini","openrouter"]` → `cloudflare`
+succeeds; disabling cloudflare too → `opencode_zen` succeeds; disabling that →
+`ollama_cloud` (which returned empty content at the CLI's `max_tokens=32`
+until the default switch to `gemma4:31b`, after which it returns `provider-ok`).
+`python -m app.cli providers` now reports configured=True for nvidia, gemini,
+cloudflare, ollama_cloud, opencode_zen, openrouter, fake. NVIDIA live facts:
+cold start 60–370s; `.env` ships the cold-start-optimized
+`DEVPILOT_PROVIDER_TIMEOUT_SECONDS=60` so a request fails over fast to the
+sub-second backups instead of waiting out the spin-up (NVIDIA returns
+automatically once its pod is warm); warm pod 2–8s; `nvidia → gemini` failover
+observed live.
+
+**Cold-start optimization (Session 43 follow-up)** — head-to-head TTFT
+benchmark across all keyed providers (3 trials each, streamed): cloudflare
+`llama-4-scout-17b` **0.52–0.67s** TTFT + 71 ch/s (fastest, new default);
+nvidia `llama-3.1-8b-instruct` 0.34–0.99s TTFT (equal only when pod warm);
+ollama_cloud `gemma4:31b` 0.68–0.97s TTFT + 60 ch/s clean JSON (best middle
+ground); opencode_zen `deepseek-v4-flash-free` 1.9–6.2s TTFT + 15 ch/s
+(slowest, keep last). Benchmark surfaced a **real bug**: llama-4-scout's stream
+emits non-string (int) `delta.content` chunks (observed `2`, `4` of 36) that
+would corrupt agent streaming — `CloudflareProvider.chat_stream` now skips
+non-string deltas (regression test `test_chat_stream_skips_non_string_deltas`).
+`DEVPILOT_PROVIDER_TIMEOUT_SECONDS` lowered 240 → **60** in `.env` so failover
+hits the sub-second backups fast when NVIDIA cold-starts (NVIDIA's client
+timeout stays 300s ≥ router 60s so the router's bounded retry/failover is the
+effective policy). Full suite: **1787 passed / 17 skipped / 2 failed (both
+pre-existing) / 54 deselected**.
+
+**Docs** — `docs/MULTI_PROVIDER_ROUTING.md` (§2.1 registry table now 11
+providers + registry-is-single-source, §2.2 disabled + new canonical order +
+JSON-from-env note, §2.13 "Backup providers — Cloudflare Workers AI, Ollama
+Cloud, OpenCode Zen + generic OpenAI-compatible", §3 config tables +
+`PROVIDER_DISABLED` row); `docs/ARCHITECTURE.md` (Provider Router section:
+11-provider chain, registry bullet, new providers + disabled config);
+`README.md` (canonical chain + Phase 20F paragraph referencing the completion
+report);
+`backend/app/llm/providers/ollama.py` docstring ("how a future provider is
+added" → step 3 points at `provider_registry.py`);
+`workflow-status/MULTI_PROVIDER_CONFIG_COMPLETION_REPORT.md` (new).
+
+**Status** — working tree carries Session-41 `json_repair.py` + Session-42
+NVIDIA + this Session-43 Phase 20F tree (NOT committed; user to review).
+
+**Next (Session 44):** 1) commit the Session-40 A6 + Session-41 + Session-42 +
+Session-43 trees after user review; 2) enterprise roadmap workstream E1.
 
 

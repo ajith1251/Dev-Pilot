@@ -473,8 +473,9 @@ llm_factory.get_provider()  ──►  RoutedProvider facade (agents unchanged)
       │
       ▼
       ProviderRouter
-      │  priority chain: [DEVPILOT_LLM_PROVIDER] + gemini, openai,
-      │                   anthropic, openrouter, ollama, fake
+      │  priority chain: [DEVPILOT_LLM_PROVIDER] + nvidia, gemini, cloudflare,
+      │                   ollama_cloud, opencode_zen, openai, anthropic,
+      │                   openrouter, ollama, openai_compatible, fake
       │  per-provider CircuitBreaker  (closed → open → half-open)
       │  bounded RetryStrategy        (exponential backoff, recoverable only)
       │  failure classification       (quota → fail over immediately)
@@ -495,9 +496,22 @@ llm_factory.get_provider()  ──►  RoutedProvider facade (agents unchanged)
   returns masked suffixes only (`app/llm/redaction.py`).
 - **Persistence** — best-effort `provider_metric_snapshots` rows (migration
   `014`) when PostgreSQL is reachable; clean no-op otherwise.
-- **New providers** — `openrouter` (OpenAI-compatible, requires key) and
-  `ollama` (keyless, `OLLAMA_BASE_URL`). Full design:
-  `docs/MULTI_PROVIDER_ROUTING.md`.
+- **Centralized registry (Phase 20F)** — `app/llm/provider_registry.py` is the
+  single place a provider is added: one `ProviderSpec` (name, class, availability
+  attribute, always-present flag) + a config block in `app/config.py` + a
+  `BaseLLMProvider` implementation. `LLMFactory._providers`, the router's
+  availability map and canonical (default priority) order all derive from it —
+  adding a provider touches no agent, factory or routing code.
+- **New providers** — `nvidia` (OpenAI-compatible NIM, default), `gemini`,
+  `cloudflare` (Workers AI, OpenAI-compatible), `ollama_cloud` (hosted Ollama,
+  OpenAI-compatible), `opencode_zen` (OpenAI-compatible gateway, free-tier
+  `-free` models), `openrouter` (OpenAI-compatible, requires key),
+  `openai_compatible` (any OpenAI chat-completions endpoint:
+  vLLM/TGI/llama.cpp/LM Studio/remote Ollama) and `ollama` (keyless,
+  `OLLAMA_BASE_URL`) — 11 registered providers. `DEVPILOT_PROVIDER_DISABLED`
+  (JSON array from `.env`) excludes a provider from routing without deleting
+  its key.
+  Full design: `docs/MULTI_PROVIDER_ROUTING.md`.
 
 ---
 
