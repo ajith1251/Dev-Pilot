@@ -1,6 +1,6 @@
 # DevPilot Project State
 
-> **Last updated**: August 5, 2026 (session 40 — Phase 20A6 full multi-repository dashboard & autonomous run experience)
+> **Last updated**: August 6, 2026 (session 41 — workstream C live E2E re-run: infrastructure green, blocked on free-tier model)
 > **Current Phase**: Phase 20 COMPLETE ✅ — **Phase 20A6 full dashboard DONE Session 40**: the complete multi-repository user experience — `backend/app/services/run_dashboard.py` (repository-aware view builder: `build_repository_view` per-repo status cards + six-stage per-repo timeline, `build_organization_summary` org-level execution summary; duck-typed for `DevPilotRun` + `DevPilotRunResult`; evidence-only, run-scoped isolation), API/WS/CLI all consume the builders (`GET /runs/{id}` + `POST /runs` + WS broadcast carry `repositories` + `organization_summary`; run list `repository_count`; `POST /runs` accepts `acceptance_criteria` + `execution_budget`), org repositories search/filter/pagination + per-repo stats endpoint, `RepositorySelector`/`RepositoryStatusCards`/`RepositoryTimeline`/`OrganizationSummary`/`RunHistoryPanel` frontend components + `CreateRunModal` criteria/budget/ordering/relationships, **restart recovery** (PostgresRunStore round-trips `repository_path`/`auxiliary_repositories`/`repo_patches` so the dashboard rebuilds identically after restart), 25 new backend tests (`test_phase20a6_dashboard.py`) + 14 new frontend vitest — backend **1681 passed / 17 skipped / 1 pre-existing env failure**, frontend **63 passed**, `next build` EXIT=0, `demo_phase20.py` demos A–M ALL PASS (PG verified). Report: `PHASE20A6_COMPLETION_REPORT.md`. (Earlier in Phase 20: E DONE Session 38 unittest XML / Vitest JSON / Jest JSON parsers; B1 DONE Session 37 `DEVPILOT_GEMINI_TIER` paid tier; B2 DONE Session 34 typed per-capability fallback chains; B3 DONE Session 35 mid-stream token-loss failover; D DONE Session 36 org-graph UI parity; A1+A2 Session 28 commit `0954604`, A3 Session 29 `895dad5`, A4 Session 31 `e1fc08e`, A5 Session 32, A6 Session 33 run-detail surface). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
 > **Total tests**: **1681 passed / 17 skipped / 1 failed / 54 deselected (integration)** on the Session-40 deterministic run (`-m "not live and not integration"`; the 1 failure is the pre-existing `test_wrapper_skips_cleanly_without_provider` env quirk — the `.env` Gemini key means the wrapper subprocess runs live). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **98 new backend tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), **A6 dashboard: 25 (`test_phase20a6_dashboard.py` — view builder both shapes, org summary, API sanitize/create/list, org repositories search/filter/pagination + per-repo stats, WS broadcast payload, CLI `--json`, PostgresRunStore A6 round-trip)**. Phase 20B: **29 new tests** — B1: 12, B2: 12, B3: 5 (`test_provider_router.py` now 60). Phase 20E: **12 new tests** in `test_testing.py`. Frontend vitest **63 passed (8 files)** (49 prior + 11 `repositoryStatusModel` mappers + 3 client additions). `scripts/demo_phase20.py` demos A–M ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
@@ -2602,14 +2602,54 @@ frontend routes + Phase table row; `workflow-status/PHASE20_ROADMAP.md` (A6
 full-dashboard section, sequencing, verification, Phase 20 COMPLETE);
 `workflow-status/PHASE20A6_COMPLETION_REPORT.md` (new).
 
-**Next (Session 41):** 1) ⚠️ **COMMIT the uncommitted Session-40 working tree**
-(24 changed/new files — Phase 20A6 full dashboard: `app/services/run_dashboard.py`,
-`tests/test_phase20a6_dashboard.py`, API/CLI/WS/`postgres_run_store`/`demo_phase20`
-edits, frontend runs components + client + model mappers, docs
-ROADMAP/ARCHITECTURE/PROJECT_STATE + new `PHASE20A6_COMPLETION_REPORT.md`).
-2) Phase 20A6 contract honored — **do NOT begin Phase 20B** (already complete).
-3) Workstream C (live E2E: `scripts/demo_phase17.py --live`,
-`scripts/verify_api_durability.py --live`) re-runs after a Gemini quota reset;
-4) then the enterprise roadmap (E1–E7, `workflow-status/ENTERPRISE_ROADMAP.md`).
+**Session 41 logged below** — Session-40 tree committed as `8c16df9`;
+workstream C live E2E re-ran on OpenRouter but is **BLOCKED (not green)** on
+free-tier model quality (planner JSON parse + timeouts).
+
+---
+
+### Session 41 (August 6, 2026) — Workstream C Live E2E Re-Run: Infra Green, Blocked on Free-Tier Model ⛔
+
+Picked up Session 40's next-step list.
+
+**Commit** — the Session-40 Phase 20A6 working tree (28 files) committed as
+`8c16df9` ("Phase 20A6: full multi-repository dashboard & autonomous run
+experience"); working tree clean at that point.
+
+**Workstream C re-run** — `scripts/demo_phase17.py --live` and
+`scripts/verify_api_durability.py --live` re-ran against the current OpenRouter
+provider (free `poolside/laguna-s-2.1:free`).
+- Gate fix: `check_live_mode` in `backend/scripts/demo_phase17.py` hardcoded
+  the "real provider" allow-list to `("openai","anthropic","gemini")`,
+  rejecting the now-active OpenRouter provider. Added `openrouter` + its
+  `OPENROUTER_API_KEY` check. `verify_api_durability.py` reuses this gate.
+- `verify_api_durability.py --live`: PostgresRunStore persistence + restart
+  recovery confirmed across BOTH HTTP paths (run API + goal API) ✅
+  (`BOTH HTTP paths persist runs/handoffs/consensus via PostgresRunStore ✅`).
+  Every run however FAILED at planning — `Failed to parse planner JSON` →
+  `Plan has no steps` — so the terminal-verdict CI gate exited 1.
+- `demo_phase17.py --live`: demos A + B failed at the same planner JSON parse;
+  demo D progressed past planning then hit 3× 60s OpenRouter timeouts → Gemini
+  failover → coding `insufficient_context` (no patch produced), and the process
+  ended mid-retry.
+- Deterministic durability tests re-verified: `tests/test_api_durability.py`
+  (non-live) 4 passed / 1 pre-existing env failure
+  (`test_wrapper_skips_cleanly_without_provider` — the `.env` provider makes
+  the wrapper subprocess run live).
+
+**Verdict** — workstream C **ran but is BLOCKED (not green)**: the durability
+infrastructure (PG round-trip, restart recovery, provider failover, bounded
+retries) is healthy; the blocker is free-tier model quality/availability (strict
+plan JSON + timeouts). Unblock options: `DEVPILOT_GEMINI_TIER=paid`, an
+OpenRouter credit + JSON-capable paid model for `DEVPILOT_OPENROUTER_MODEL`,
+and/or a `planner.py` JSON-repair fallback.
+
+**Status** — `8c16df9` + this session's `check_live_mode` fix + doc updates;
+`workflow-status/PHASE20_ROADMAP.md` §C marked BLOCKED (not green).
+
+**Next (Session 42):** 1) re-run workstream C after a paid/JSON-capable model is
+configured; 2) start the enterprise roadmap workstream E1 (self-hosted inference
+fabric — `DEVPILOT_INFERENCE_MODE`, local vLLM/ollama backends) per
+`workflow-status/ENTERPRISE_ROADMAP.md`.
 
 

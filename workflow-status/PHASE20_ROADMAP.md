@@ -219,6 +219,19 @@ Close the execution gap on top of the org graph.
 - Re-run `scripts/demo_phase17.py --live` and
   `scripts/verify_api_durability.py --live` after a Gemini quota reset; refresh
   `docs/GEMINI_API_KEY_REPORT.md`.
+  **⛔ RE-RUN Session 41 — BLOCKED (not green):** live E2E re-ran on the active
+  OpenRouter provider after fixing the `check_live_mode` gate
+  (`backend/scripts/demo_phase17.py`) to accept `openrouter` (it previously
+  hardcoded `("openai","anthropic","gemini")`). `verify_api_durability.py
+  --live` confirmed PostgresRunStore persistence + restart recovery across
+  BOTH HTTP paths ✅, but every live run FAILED at planning — `Failed to parse
+  planner JSON` → `Plan has no steps` — and demo D hit 3× 60s OpenRouter
+  timeouts → Gemini failover → coding `insufficient_context` (no patch
+  produced). Root cause: the free-tier `poolside/laguna-s-2.1:free` model
+  can't emit the strict plan JSON and times out on heavy prompts. Unblock:
+  `DEVPILOT_GEMINI_TIER=paid`, an OpenRouter credit + JSON-capable paid model
+  for `DEVPILOT_OPENROUTER_MODEL`, and/or a `planner.py` JSON-repair fallback;
+  then re-run.
 
 ### D. Org-Graph UI Parity (polish)
 
@@ -310,5 +323,6 @@ Close the execution gap on top of the org graph.
 (B1 paid Gemini tier — Session 37; B2 typed fallbacks — Session 34; B3 mid-stream
 token-loss failover — Session 35), workstream D (org-graph UI parity — Session 36)
 and workstream E (unittest XML / Vitest JSON / Jest JSON parsers — Session 38) are
-all DONE. Remaining: workstream C (live E2E) re-runs after a Gemini quota reset
-now that a paid tier is available.
+all DONE. Workstream C (live E2E) re-ran Session 41 on OpenRouter — **BLOCKED
+(not green)** on free-tier model quality (planner JSON parse + timeouts); see
+§C above for unblock options.

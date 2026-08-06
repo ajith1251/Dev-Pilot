@@ -125,7 +125,7 @@ def check_live_mode() -> bool:
     from app.llm.factory import factory as llm_factory
 
     provider = (settings.LLM_PROVIDER or "").lower()
-    real = ("openai", "anthropic", "gemini")
+    real = ("openai", "anthropic", "gemini", "openrouter")
     if provider not in real:
         print(f"  [error] --live requires a real LLM provider; "
               f"DEVPILOT_LLM_PROVIDER='{provider}' is not "
@@ -143,6 +143,7 @@ def check_live_mode() -> bool:
         "openai": settings.OPENAI_API_KEY,
         "anthropic": settings.ANTHROPIC_API_KEY,
         "gemini": settings.GEMINI_API_KEY,
+        "openrouter": settings.OPENROUTER_API_KEY,
     }.get(provider)
     if not key:
         print(f"  [error] --live requires {provider.upper()}_API_KEY in .env.")
