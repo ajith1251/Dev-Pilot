@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import ValidationError
 
 from app.agents.base import BaseAgent
+from app.agents.json_repair import repair_json_text
 from app.core.exceptions import (
     CodingError,
     CodingOutputValidationError,
@@ -404,6 +405,20 @@ class CodingAgent(BaseAgent[CodingAgentInput, CodingAgentOutput]):
                     return data
             except (json.JSONDecodeError, ValueError) as exc:
                 last_err = exc
+
+            # Malformed-JSON repair (unquoted keys, smart quotes, trailing
+            # commas, single quotes, bare None/True/False) — the same recovery
+            # pipeline the planner uses. Live coding failures surfaced this
+            # exact class ("Expecting property name enclosed in double
+            # quotes") before the repair fallback existed.
+            repaired = repair_json_text(candidate)
+            if repaired is not None:
+                try:
+                    data = json.loads(repaired)
+                    if isinstance(data, dict):
+                        return data
+                except (json.JSONDecodeError, ValueError) as exc:
+                    last_err = exc
         raise CodingOutputValidationError(
             f"Failed to parse LLM output as JSON: {last_err}",
             details={"raw_json": primary[:500]},

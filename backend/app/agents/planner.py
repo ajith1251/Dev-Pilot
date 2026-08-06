@@ -16,6 +16,13 @@ import re
 from typing import Any, Dict, Optional
 
 from app.agents.base import BaseAgent
+from app.agents.json_repair import (
+    extract_json_object,
+    fix_single_quotes,
+    mask_string_contents,
+    repair_json_text,
+    unmask_string_contents,
+)
 from app.core.logging import logger
 from app.llm.base import LLMConfig, LLMMessage
 from app.llm.factory import factory as llm_factory
@@ -309,7 +316,7 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
             except json.JSONDecodeError:
                 pass
 
-            repaired = self._repair_json_text(candidate)
+            repaired = repair_json_text(candidate)
             if repaired is not None:
                 try:
                     parsed = json.loads(repaired)
@@ -324,161 +331,30 @@ class PlannerAgent(BaseAgent[PlannerInput, ImplementationPlan]):
     @staticmethod
     def _extract_json_object(text: str) -> str:
         """Extract the first balanced-brace JSON object (best effort)."""
-        start = text.find("{")
-        if start == -1:
-            return ""
-
-        depth = 0
-        in_string = False
-        escape = False
-        end = start
-
-        for i in range(start, len(text)):
-            ch = text[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\" and in_string:
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if not in_string:
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-
-        if depth != 0:
-            return ""
-        return text[start:end]
+        return extract_json_object(text)
 
     @staticmethod
     def _repair_json_text(text: str) -> Optional[str]:
-        """Best-effort repair of common malformed JSON emitted by weaker LLMs.
-
-        Applies cumulative fixes (unicode punctuation, control chars, trailing
-        commas, single-quoted strings, unquoted keys, bare None/True/False) and
-        returns the repaired text only if it finally parses as JSON.
-        """
-        t = text
-        for src, dst in (
-            ("\u201c", '"'), ("\u201d", '"'),
-            ("\u2018", "'"), ("\u2019", "'"),
-            ("\u2014", "-"), ("\u2013", "-"),
-            ("\u2026", "..."), ("\u00a0", " "),
-            ("\u200b", ""), ("\ufeff", ""),
-        ):
-            t = t.replace(src, dst)
-
-        t = "".join(ch for ch in t if ch in "\t\n\r" or ord(ch) >= 32)
-
-        t = PlannerAgent._fix_single_quotes(t)
-        masked, tokens = PlannerAgent._mask_string_contents(t)
-
-        masked = re.sub(r",\s*([}\]])", r"\1", masked)
-        masked = re.sub(
-            r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', masked
-        )
-        masked = re.sub(r"\bNone\b", "null", masked)
-        masked = re.sub(r"\bTrue\b", "true", masked)
-        masked = re.sub(r"\bFalse\b", "false", masked)
-
-        repaired = PlannerAgent._unmask_string_contents(masked, tokens)
-
-        try:
-            json.loads(repaired)
-        except json.JSONDecodeError:
-            return None
-        return repaired
+        """Best-effort repair of common malformed JSON emitted by weaker LLMs
+        (shared with the coding agent). Returns the repaired text only if it
+        finally parses as JSON."""
+        return repair_json_text(text)
 
     @staticmethod
     def _fix_single_quotes(text: str) -> str:
         """Convert single-quoted strings to double-quoted, ignoring double-quoted
         regions (so apostrophes inside real JSON strings are never touched)."""
-        out: list[str] = []
-        i, n = 0, len(text)
-        in_double = False
-        while i < n:
-            c = text[i]
-            if in_double:
-                out.append(c)
-                if c == "\\" and i + 1 < n:
-                    out.append(text[i + 1])
-                    i += 2
-                    continue
-                if c == '"':
-                    in_double = False
-                i += 1
-                continue
-            if c == '"':
-                in_double = True
-                out.append(c)
-                i += 1
-                continue
-            if c == "'":
-                j = i + 1
-                buf: list[str] = []
-                while j < n and text[j] != "'":
-                    buf.append(text[j])
-                    j += 1
-                if j < n:
-                    content = "".join(buf)
-                    content = content.replace("\\", "\\\\").replace('"', '\\"')
-                    out.append('"')
-                    out.append(content)
-                    out.append('"')
-                    i = j + 1
-                    continue
-            out.append(c)
-            i += 1
-        return "".join(out)
+        return fix_single_quotes(text)
 
     @staticmethod
     def _mask_string_contents(text: str) -> tuple[str, list[str]]:
         """Replace double-quoted string bodies with placeholders so regex repairs
         never touch string values; returns (masked_text, tokens)."""
-        tokens: list[str] = []
-        out: list[str] = []
-        i, n = 0, len(text)
-        while i < n:
-            ch = text[i]
-            if ch == '"':
-                j = i + 1
-                body: list[str] = []
-                while j < n:
-                    c = text[j]
-                    if c == "\\":
-                        body.append(c)
-                        if j + 1 < n:
-                            body.append(text[j + 1])
-                        j += 2
-                        continue
-                    if c == '"':
-                        break
-                    body.append(c)
-                    j += 1
-                if j < n:
-                    token = f"\x00STR{len(tokens)}\x00"
-                    tokens.append("".join(body))
-                    out.append('"')
-                    out.append(token)
-                    out.append('"')
-                    i = j + 1
-                    continue
-            out.append(ch)
-            i += 1
-        return "".join(out), tokens
+        return mask_string_contents(text)
 
     @staticmethod
     def _unmask_string_contents(masked: str, tokens: list[str]) -> str:
-        for idx, token in enumerate(tokens):
-            masked = masked.replace(f"\x00STR{idx}\x00", token)
-        return masked
+        return unmask_string_contents(masked, tokens)
 
     # ── Plan building ─────────────────────────────────────────
 

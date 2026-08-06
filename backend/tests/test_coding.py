@@ -564,6 +564,41 @@ class TestCodingAgent:
             agent._extract_json(text), text)
         assert data["changes"][0]["path"] == "x.py"
 
+    def test_parse_response_repairs_unquoted_keys(self, agent):
+        """Malformed LLM JSON (unquoted keys) must be repaired, not rejected.
+
+        Regression for live coding failure: "Failed to parse LLM output as
+        JSON: Expecting property name enclosed in double quotes: line 1
+        column 2 (char 1)" — the same class of bug the planner repair fixed.
+        """
+        text = ('{changes: [{change_id: "C1", operation: "CREATE", '
+                'path: "x.py", new_content: "def f() { return x\\n"}]}')
+        data = agent._load_json_with_fallback(
+            agent._extract_json(text), text)
+        assert data["changes"][0]["path"] == "x.py"
+        assert data["changes"][0]["new_content"] == "def f() { return x\n"
+
+    def test_parse_response_repairs_single_quotes(self, agent):
+        """Single-quoted keys/strings in the coding payload must be repaired,
+        including code values with literal newlines (JSON-escaped on repair)."""
+        text = ("{'changes': [{'change_id': 'C1', 'operation': 'CREATE', "
+                "'path': 'x.py', 'new_content': 'import os\n'}]}")
+        data = agent._load_json_with_fallback(
+            agent._extract_json(text), text)
+        assert data["changes"][0]["operation"] == "CREATE"
+        assert data["changes"][0]["new_content"] == "import os\n"
+
+    def test_parse_response_repairs_string_value_braces_kept_intact(self, agent):
+        """The repair must never corrupt string values that hold code/braces."""
+        text = ('{"changes": [{"change_id": "C1", "operation": "CREATE", '
+                '"path": "x.py", "new_content": "def f() { return x", "why, colon": 1}]} '
+                'trailing prose')
+        data = agent._load_json_with_fallback(
+            agent._extract_json(text), text)
+        assert data["changes"][0]["new_content"] == "def f() { return x"
+        assert data["changes"][0]["why, colon"] == 1
+
+
     def test_extract_json_trailing_prose_after_object(self, agent):
         """Prose after the JSON object (no braces) must not break extraction."""
         text = '{"changes": [{"path": "a.py"}]} here is the patch summary'
