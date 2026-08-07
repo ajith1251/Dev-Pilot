@@ -29,6 +29,7 @@ chain-of-thought.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -699,6 +700,8 @@ class AutonomousExecutionController:
         self._cancellation: Dict[str, bool] = {}
         self._pause_requested: Dict[str, bool] = {}
         self._pending_input: Dict[str, str] = {}
+        # Phase 20B: goal start timestamps for autonomous-duration metrics.
+        self._goal_started_at: Dict[str, float] = {}
 
     # ── Service accessors ────────────────────────────────────────
 
@@ -895,6 +898,14 @@ class AutonomousExecutionController:
         self._goals[goal_id] = state
         await self._persist_goal(state)
         await self._broadcast(state, "goal_created", "Goal created")
+        # Phase 20B: autonomous-execution duration observability.
+        try:
+            from app.services.system_metrics import get_system_metrics
+
+            self._goal_started_at[goal_id] = time.time()
+            get_system_metrics().record_autonomy_goal_started(goal_id)
+        except Exception:
+            pass
         return state
 
     # ── Dry run (§29) ────────────────────────────────────────────
@@ -950,6 +961,35 @@ class AutonomousExecutionController:
     # ── The autonomous loop (§7) ─────────────────────────────────
 
     async def start(self, goal_id: str) -> AutonomousRunState:
+        """Run the bounded autonomous loop until a terminal state.
+
+        Phase 20B: records autonomous-execution duration metrics when the
+        goal reaches a terminal state (wrapper around ``_start_impl`` so
+        every early return path is covered).
+        """
+        state = await self._start_impl(goal_id)
+        if state.state in (
+            ExecutionState.COMPLETED, ExecutionState.FAILED,
+            ExecutionState.CANCELLED, ExecutionState.STOPPED,
+            ExecutionState.WAITING_FOR_HUMAN,
+        ):
+            try:
+                from app.services.system_metrics import get_system_metrics
+
+                started = self._goal_started_at.pop(goal_id, None)
+                duration = (
+                    time.time() - started
+                    if started is not None
+                    else (getattr(state, "created_at", None) or 0.0)
+                )
+                get_system_metrics().record_autonomy_goal(
+                    goal_id, float(duration), state.state.value
+                )
+            except Exception:
+                pass
+        return state
+
+    async def _start_impl(self, goal_id: str) -> AutonomousRunState:
         """Run the bounded autonomous loop until a terminal state."""
         state = self._goals.get(goal_id)
         if state is None:

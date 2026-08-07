@@ -195,6 +195,10 @@ def main() -> None:
     from app.cli_providers import add_cli_commands as add_providers_commands
     add_providers_commands(subparsers)
 
+    # ── Phase 20B: Operational Hardening Commands ───────────────────
+    from app.cli_operations import add_cli_commands as add_operations_commands
+    add_operations_commands(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "analyze":
@@ -355,6 +359,15 @@ def main() -> None:
     elif args.command == "provider-test":
         from app.cli_providers import run_provider_test
         asyncio.run(run_provider_test(args.message, args.model, args.json))
+    elif args.command == "validate-config":
+        from app.cli_operations import run_validate_config
+        run_validate_config(args.json)
+    elif args.command == "ops-status":
+        from app.cli_operations import run_ops_status
+        run_ops_status(args.json)
+    elif args.command == "ops-metrics":
+        from app.cli_operations import run_ops_metrics
+        run_ops_metrics(args.json)
     else:
         parser.print_help()
 

@@ -358,6 +358,14 @@ PostgreSQL 18 (localhost:5432)
 | GET | `/api/v1/providers/metrics/history` | Persisted per-provider history | 19B |
 | GET | `/api/v1/providers/config` | Redacted routing configuration | 19B |
 | POST | `/api/v1/providers/test` | Route one benign test call | 19B |
+| GET | `/health/live` | Liveness probe (always 200) | 20B |
+| GET | `/health/ready` | Readiness probe (200/503 from subsystem matrix) | 20B |
+| GET | `/api/v1/operations/status` | Subsystem health matrix + readiness summary | 20B |
+| GET | `/api/v1/operations/metrics` | Runtime operational metrics (runs/repos/autonomy/resources) | 20B |
+| GET | `/api/v1/operations/startup-validation` | Startup configuration findings | 20B |
+| WS | `/api/v1/ws/system` | System snapshot broadcast channel | 20B |
+| CLI | `devpilot operations-status` / `operations-metrics` | Operations observability | 20B |
+| CLI | `devpilot validate-config` | Startup configuration validation (exit 1 on errors) | 20B |
 | (DB) | `devpilot db-check` (CLI) | Database connectivity diagnostic | DB |
 
 ---
@@ -443,7 +451,11 @@ Dashboard (Next.js 14, TypeScript, Tailwind CSS)
     │                                    filters, timeline diff, live
     │                                    WebSocket updates (Phase 19C)
     ├── /dashboard/organization-graph  — Organization graph (Phase 12)
-    └── /dashboard/providers           — Provider router observability (Phase 19B)
+    ├── /dashboard/providers           — Provider router observability (Phase 19B)
+    └── /dashboard/operations          — Operations Dashboard (Phase 20B): live system
+                                         health, provider status, failover history,
+                                         active runs, queue status, PostgreSQL /
+                                         WebSocket / resource state, startup findings
 ```
 
 The engineering-graph explorer runs on a production graph engine:
@@ -591,6 +603,70 @@ repository-aware dashboard view from persisted state (demo M).
 
 ---
 
+## Production Reliability & Operations (Phase 20B)
+
+Final production-hardening layer before closing Phase 20 — reliability,
+observability, resilience, and operational stability. Full design:
+`docs/PRODUCTION_RELIABILITY.md`.
+
+### Provider reliability (extends the Phase 19B router)
+
+```text
+ProviderRouter (Phase 20B additions)
+    ├── health-based selection   healthy > warming > unknown > degraded > unhealthy
+    │                            (min-sample guard: ≥ PROVIDER_HEALTH_MIN_SAMPLES
+    │                             traffic samples before rate ranks apply)
+    ├── recovery detection       success after a failure spell ⇒ recovery + warm-up
+    ├── automatic probing        passive ProviderHealthProbe loop (out of window)
+    ├── post-failure cooldown    skipped for PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS
+    ├── adaptive timeouts        max(base, avg_latency × multiplier) capped
+    └── circuit probe priority   OPEN-past-cooldown ranks first (gets its probe)
+```
+
+### Operational lifecycle (`app/main.py` lifespan)
+
+1. `run_startup_validation()` — deterministic config checks (fail-fast when
+   `DEVPILOT_STARTUP_VALIDATION_STRICT=true`).
+2. `ProviderHealthProbe.start()` — background probe loop.
+3. `ProviderMetricsPersistence.start()` — background PG snapshot loop.
+4. Correlation-ID middleware + request-size limit on every request.
+5. Shutdown: stop both loops, close WebSockets, dispose the engine — idempotent
+   restart recovery (demo F re-enters the lifespan twice).
+
+### Observability surface
+
+- `SystemMetricsService` — bounded run/repo/autonomy/provider/resource counters
+  with per-minute throughput, average durations, memory + open-task sampling.
+- `subsystem_status.py` — one readiness matrix shared by `/health/ready` and
+  `GET /api/v1/operations/status` (providers, database, graph,
+  repository_memory, inference, orchestration, websocket, resources).
+- `app/core/context.py` + `middleware.py` + `logging.py` — per-request
+  correlation IDs (`X-Correlation-ID`) injected into every log record.
+- Operations Dashboard `/dashboard/operations` — live state from the real
+  APIs only (no mock data).
+
+### Key config knobs
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEVPILOT_PROVIDER_HEALTH_PROBE_ENABLED` / `_INTERVAL_SECONDS` / `_TIMEOUT_SECONDS` | true / 120 / 10 | Automatic provider probing |
+| `DEVPILOT_PROVIDER_HEALTH_BASED_SELECTION` | true | Health-ranked provider selection |
+| `DEVPILOT_PROVIDER_HEALTH_MIN_SAMPLES` | 5 | Samples before rate ranks apply |
+| `DEVPILOT_PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS` | 5 | Post-failure cooldown |
+| `DEVPILOT_PROVIDER_WARM_UP_SECONDS` | 30 | Post-recovery warm-up |
+| `DEVPILOT_PROVIDER_ADAPTIVE_TIMEOUT_ENABLED` / `_MULTIPLIER` / `_MAX_SECONDS` | true / 3.0 / 300 | Adaptive timeouts |
+| `DEVPILOT_STARTUP_VALIDATION_STRICT` | false | Fail fast on config errors |
+| `DEVPILOT_MAX_REQUEST_BODY_BYTES` | 10 MiB | HTTP request-size limit (413) |
+| `DEVPILOT_PROVIDER_METRICS_PERSIST_INTERVAL_SECONDS` | 300 | Metrics snapshot cadence |
+
+Deterministic demonstrations: `python scripts/demo_phase20b.py` (A–F: provider
+outage→recovery, database reconnect, leak-free long run, live ops dashboard,
+accurate health endpoints, graceful shutdown + restart recovery). Tests:
+`tests/test_phase20b_provider_reliability.py`, `tests/test_phase20b_operations.py`,
+`tests/test_startup_validation.py`.
+
+---
+
 ## Future Phases
 
 | Phase | Focus | Status |
@@ -617,6 +693,6 @@ repository-aware dashboard view from persisted state (demo M).
 | 19 | Semantic EKG Retrieval + EKG-driven test selection | ✅ Complete |
 | 19B | Multi-Provider Failover & Reliability Platform | ✅ Complete |
 | 19C | Cross-repo namespaces + interactive EKG viz + multi-repo acquisition + org-scope queries | ✅ Complete |
-| 20 | Cross-Repository Autonomous Engineering & Production Readiness (A1–A6: multi-repo runs, per-repo scope + EKG ingestion, repository dashboard; B1–B3: provider routing resilience; D: org-graph UI parity; E: unittest/Vitest/Jest parsers) | ✅ Complete (see `workflow-status/PHASE20_ROADMAP.md` + `PHASE20A6_COMPLETION_REPORT.md`) |
+| 20 | Cross-Repository Autonomous Engineering & Production Readiness (A1–A6: multi-repo runs, per-repo scope + EKG ingestion, repository dashboard; B1–B3: provider routing resilience; D: org-graph UI parity; E: unittest/Vitest/Jest parsers; **20B: production reliability & operational hardening** — provider probes/recovery/cooldown/selection, health endpoints, operations dashboard, startup validation, correlation IDs, resource cleanup) | ✅ Complete (see `workflow-status/PHASE20_ROADMAP.md` + `PHASE20A6_COMPLETION_REPORT.md` + `PHASE20B_COMPLETION_REPORT.md`) |
 
 

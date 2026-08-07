@@ -354,6 +354,14 @@ class OrchestrationService:
         if not run:
             return self._error_result(run_id, "Run not found", FailureCode.UNKNOWN)
 
+        # Phase 20B: operational metrics — track run start for throughput.
+        try:
+            from app.services.system_metrics import get_system_metrics
+
+            get_system_metrics().record_run_started(run_id)
+        except Exception:
+            pass
+
         run.status = RunStatus.RUNNING
         run.started_at = datetime.now(timezone.utc).isoformat()
 
@@ -1214,6 +1222,7 @@ class OrchestrationService:
     async def _stage_analysis(self, run: DevPilotRun) -> bool:
         """Analyze the repository."""
         await self._transition_to(run, StageType.ANALYZING_REPOSITORY)
+        repo_analysis_start = time.time()
         try:
             if not run.repository_path:
                 await self._skip_stage(run, StageType.ANALYZING_REPOSITORY, "No repository path")
@@ -1226,6 +1235,16 @@ class OrchestrationService:
             profile = getattr(state, "profile", None)
             run.repository_profile = profile
             await self._complete_stage(run, StageType.ANALYZING_REPOSITORY)
+            # Phase 20B: repository processing-time observability.
+            try:
+                from app.services.system_metrics import get_system_metrics
+
+                get_system_metrics().record_repository_processing(
+                    run.repository_path,
+                    time.time() - repo_analysis_start,
+                )
+            except Exception:
+                pass
             return True
         except Exception as exc:
             run.failure = RunFailure(
@@ -2027,6 +2046,13 @@ class OrchestrationService:
     async def _finalize(self, run: DevPilotRun, start_time: float) -> DevPilotRunResult:
         """Finalize a run and produce the result."""
         duration = time.time() - start_time
+        # Phase 20B: operational metrics — track run completion for throughput.
+        try:
+            from app.services.system_metrics import get_system_metrics
+
+            get_system_metrics().record_run_completed(run.run_id, duration * 1000.0)
+        except Exception:
+            pass
         run.finished_at = datetime.now(timezone.utc).isoformat()
 
         # Phase 17: build consensus + contradictions + engineering notebook

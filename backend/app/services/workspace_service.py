@@ -161,6 +161,32 @@ class WorkspaceService:
                     f"Failed to clean up workspace {workspace.workspace_id}: {exc}"
                 )
 
+    def cleanup_stale_workspaces(self, max_age_seconds: float = 86400.0) -> int:
+        """Remove abandoned workspace directories older than ``max_age_seconds``.
+
+        Phase 20B resource management: a crashed process can leave
+        ``devpilot_ws-*_`` temp directories behind; this scans the configured
+        base directory (or the system temp dir) for stale ones and removes
+        them. Returns the number of directories removed. Never raises —
+        unremovable entries are skipped.
+        """
+        base = Path(self._base_dir) if self._base_dir else Path(tempfile.gettempdir())
+        removed = 0
+        if not base.is_dir():
+            return 0
+        cutoff = time.time() - max(0.0, float(max_age_seconds))
+        for candidate in base.glob("devpilot_*"):
+            if not candidate.is_dir():
+                continue
+            try:
+                if candidate.stat().st_mtime <= cutoff:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    if not candidate.exists():
+                        removed += 1
+            except OSError:
+                continue
+        return removed
+
     def _copy_source(self, source: Path, dest: Path) -> None:
         """Copy source repository to destination, excluding sensitive files."""
         try:

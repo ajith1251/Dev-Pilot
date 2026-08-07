@@ -342,6 +342,9 @@ export interface ProviderHealthSnapshot {
   consecutive_failures: number;
   retries: number;
   failovers: number;
+  recoveries?: number;
+  probes?: number;
+  failed_probes?: number;
   avg_latency_ms: number | null;
   last_latency_ms: number | null;
   last_success_at: number | null;
@@ -395,6 +398,8 @@ export interface ProviderTotals {
   failed_requests: number;
   retries: number;
   failovers: number;
+  recoveries?: number;
+  probes?: number;
 }
 
 export interface ProviderMetricsData {
@@ -421,6 +426,7 @@ export interface ProviderConfigData {
   };
   health: {
     window: number;
+    min_samples?: number;
     degraded_success_rate: number;
     unhealthy_success_rate: number;
   };
@@ -431,6 +437,82 @@ export interface ProviderTestData {
   provider: string;
   content: string;
   finish_reason: string;
+}
+
+// ── Operations (Phase 20B) ────────────────────────────────────
+
+export type SubsystemStatus = "ok" | "degraded" | "error" | "unknown";
+
+export interface SubsystemEntry {
+  status: SubsystemStatus;
+  detail: Record<string, unknown>;
+}
+
+export interface OperationsStatusData {
+  summary: {
+    ready: boolean;
+    status: "ok" | "error";
+    error_subsystems: Record<string, SubsystemStatus>;
+    checked_at: string | null;
+  };
+  subsystems: Record<string, SubsystemEntry>;
+}
+
+export interface OperationsMetricsData {
+  uptime_seconds: number;
+  runs: {
+    active: number;
+    started_total: number;
+    completed_total: number;
+    throughput_per_minute: number;
+    avg_duration_ms: number | null;
+    recent_duration_ms: number[];
+  };
+  repositories: {
+    processed_total: number;
+    avg_processing_seconds: number | null;
+    recent_seconds: number[];
+  };
+  autonomy: {
+    active_goals: number;
+    goals_total: number;
+    avg_duration_seconds: number | null;
+    recent_states: string[];
+  };
+  providers: {
+    active_provider: string | null;
+    latency_ms: Record<string, number | null>;
+    totals: ProviderTotals;
+  };
+  resources: {
+    memory_mb: number | null;
+    active_ws_connections: number;
+    open_tasks: number;
+  };
+  checked_at?: string;
+  recorded_at: number;
+}
+
+export interface StartupFinding {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+}
+
+export interface StartupValidationData {
+  strict: boolean;
+  error_count: number;
+  warning_count: number;
+  findings: StartupFinding[];
+}
+
+export interface HealthReadyData {
+  success: boolean;
+  status: "ok" | "not_ready";
+  ready: boolean;
+  error_subsystems: Record<string, SubsystemStatus>;
+  subsystems: Record<string, { status: SubsystemStatus }>;
+  checked_at: string;
 }
 
 // ── Generic API helpers ───────────────────────────────────────
@@ -592,6 +674,34 @@ export const providersApi = {
       method: "POST",
       body: JSON.stringify(message ? { message } : {}),
     });
+  },
+};
+
+// ── Operations API (Phase 20B) ────────────────────────────────
+
+export const operationsApi = {
+  /** Subsystem health matrix + readiness summary. */
+  async status(): Promise<{ success: boolean; data: OperationsStatusData }> {
+    return request("/api/v1/operations/status");
+  },
+
+  /** Runtime operational metrics: runs, repositories, autonomy, resources. */
+  async metrics(): Promise<{ success: boolean; data: OperationsMetricsData }> {
+    return request("/api/v1/operations/metrics");
+  },
+
+  /** Startup configuration validation findings. */
+  async startupValidation(): Promise<{
+    success: boolean;
+    data: StartupValidationData;
+  }> {
+    return request("/api/v1/operations/startup-validation");
+  },
+
+  /** Readiness probe (503 when required subsystems are down). */
+  async ready(): Promise<HealthReadyData> {
+    const res = await fetch(`${BASE_URL}/health/ready`);
+    return res.json() as Promise<HealthReadyData>;
   },
 };
 

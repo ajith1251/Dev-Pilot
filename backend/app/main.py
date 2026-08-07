@@ -30,10 +30,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     Startup:
         - Configures logging
+        - Validates configuration (Phase 20B: fail-fast diagnostics)
         - Initializes database engine (if DATABASE_URL configured)
         - Runs recovery check to find/mark stale runs from previous session
+        - Starts background operational loops (provider health probes,
+          provider-metric persistence)
 
     Shutdown:
+        - Stops background loops
         - Disposes database engine
         - Closes WebSocket connections
     """
@@ -44,6 +48,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         __version__,
         settings.is_debug,
     )
+
+    # ── Phase 20B: startup configuration validation ─────────────
+    # Validate provider/database configuration up front and log clear
+    # diagnostics. Strict mode (DEVPILOT_STARTUP_VALIDATION_STRICT=true)
+    # raises on errors; otherwise the app starts and the findings stay
+    # available via GET /api/v1/operations/startup-validation.
+    try:
+        from app.core.startup_validation import run_startup_validation
+
+        findings = run_startup_validation()
+        app.state.startup_validation = findings
+        app.state.startup_validation_strict = bool(settings.STARTUP_VALIDATION_STRICT)
+    except RuntimeError as exc:
+        logger.error("Startup validation failed: %s", exc)
+        raise
+    except Exception as exc:
+        logger.warning("Startup validation skipped (non-fatal): %s", exc)
+        app.state.startup_validation = []
+        app.state.startup_validation_strict = False
 
     # Initialize database engine if configured
     if settings.DATABASE_URL:
@@ -83,7 +106,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("No DATABASE_URL configured — using InMemoryRunStore")
 
+    # ── Phase 20B: background operational loops ──────────────────
+    # Provider health probes (outage detection + recovery observation) and
+    # periodic provider-metric persistence. Both stop on shutdown.
+    probe_loop = None
+    metrics_loop = None
+    try:
+        from app.services.provider_probe import get_provider_probe
+
+        probe_loop = get_provider_probe()
+        probe_loop.start()
+    except Exception as exc:
+        logger.warning("Provider health probe loop not started: %s", exc)
+    try:
+        from app.services.provider_metrics_persistence import (
+            get_provider_metrics_persistence,
+        )
+
+        metrics_loop = get_provider_metrics_persistence()
+        metrics_loop.start()
+    except Exception as exc:
+        logger.warning("Provider metrics persistence loop not started: %s", exc)
+
     yield
+
+    # ── Phase 20B: stop background loops ─────────────────────────
+    if probe_loop is not None:
+        try:
+            await probe_loop.stop()
+        except Exception as exc:
+            logger.debug("Provider probe loop stop (non-critical): %s", exc)
+    if metrics_loop is not None:
+        try:
+            await metrics_loop.stop()
+        except Exception as exc:
+            logger.debug("Provider metrics loop stop (non-critical): %s", exc)
 
     # Shutdown: dispose database engine
     if hasattr(app.state, "db_engine"):
@@ -115,6 +172,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Phase 20B middleware ────────────────────────────────────────
+# Correlation IDs for structured logging + request-size limits.
+from app.core.middleware import CorrelationIdMiddleware, RequestSizeLimitMiddleware
+
+app.add_middleware(CorrelationIdMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BODY_BYTES)
 
 
 # ── Global exception handler ────────────────────────────────────
@@ -221,3 +285,8 @@ app.include_router(durability_router)
 from app.api.v1.providers import router as providers_router
 
 app.include_router(providers_router)
+
+# Phase 20B: Operations (subsystem status, runtime metrics, startup validation)
+from app.api.v1.operations import router as operations_router
+
+app.include_router(operations_router)

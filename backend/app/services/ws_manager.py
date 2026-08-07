@@ -278,6 +278,50 @@ class WebSocketManager:
             count += len(conns)
         return count
 
+    def channel_counts(self) -> Dict[str, int]:
+        """Per-channel connection counts (Phase 20B observability).
+
+        Channels: run ids, ``__list__``, ``__graph__``, ``__autonomy__``,
+        ``__autonomy__:{goal_id}`` and ``__system__``. Pure read — safe to
+        call from the ops dashboard without awaiting the lock (best-effort).
+        """
+        return {key: len(conns) for key, conns in self._connections.items()}
+
+    async def broadcast_system_status(self, data: Dict[str, Any]) -> int:
+        """Broadcast an operational status snapshot to ``__system__`` watchers.
+
+        Powers the live Operations Dashboard badge (Phase 20B): subscribers
+        on the ``/api/v1/ws/system`` channel receive subsystem status +
+        metrics without polling.
+
+        Returns:
+            Number of clients the message was sent to.
+        """
+        async with self._lock:
+            connections = self._connections.get("__system__", set()).copy()
+
+        if not connections:
+            return 0
+
+        payload = json.dumps(
+            {
+                "type": "system_status",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data": data,
+            },
+            default=str,
+        )
+
+        sent = 0
+        for ws in connections:
+            try:
+                await ws.send_text(payload)
+                sent += 1
+            except Exception:
+                async with self._lock:
+                    self._connections.get("__system__", set()).discard(ws)
+        return sent
+
     # ── Graph live feed (§19C) ──────────────────────────────────
 
     async def broadcast_graph_update(self, data: Dict[str, Any]) -> int:

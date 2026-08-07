@@ -134,6 +134,54 @@ async def graph_websocket(websocket: WebSocket) -> None:
         await ws_manager.disconnect(websocket, "__graph__")
 
 
+@router.websocket("/system")
+async def system_websocket(websocket: WebSocket) -> None:
+    """Subscribe to the live operational status feed (Phase 20B).
+
+    On connect, sends the current subsystem status + metrics snapshot.
+    Then receives broadcasts whenever the ops dashboard (or the periodic
+    metrics loop) pushes a system_status update — powers the live badge
+    on the Operations Dashboard without polling.
+    """
+    await ws_manager.connect(websocket, "__system__")
+
+    try:
+        from app.services.subsystem_status import build_subsystem_status
+        from app.services.system_metrics import get_system_metrics
+
+        status = await build_subsystem_status()
+        payload = {
+            "subsystems": status["subsystems"],
+            "summary": status["summary"],
+            "metrics": get_system_metrics().snapshot(),
+        }
+        await websocket.send_json({
+            "type": "system_status",
+            "event_type": "snapshot",
+            "timestamp": _now(),
+            "message": "System feed connected",
+            "data": payload,
+        })
+    except Exception as exc:
+        logger.warning("Failed to send initial system snapshot: %s", exc)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "pong":
+                    pass  # Connection keepalive
+            except (json.JSONDecodeError, KeyError):
+                pass
+    except WebSocketDisconnect:
+        logger.debug("WebSocket disconnected from system feed")
+    except Exception as exc:
+        logger.warning("WebSocket error on system feed: %s", exc)
+    finally:
+        await ws_manager.disconnect(websocket, "__system__")
+
+
 @router.websocket("/runs/{run_id}")
 async def run_websocket(websocket: WebSocket, run_id: str) -> None:
     """Subscribe to real-time updates for a specific run.

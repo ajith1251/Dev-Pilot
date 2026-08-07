@@ -539,10 +539,111 @@ class Settings(BaseSettings):
         alias="DEVPILOT_PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE",
         description="Success rate below which a provider is 'unhealthy'.",
     )
+    PROVIDER_HEALTH_MIN_SAMPLES: int = Field(
+        default=5, ge=1, le=1000,
+        alias="DEVPILOT_PROVIDER_HEALTH_MIN_SAMPLES",
+        description="Minimum number of real-traffic samples before a "
+                    "provider's success rate may rank it degraded/unhealthy "
+                    "for health-based selection. Fewer samples than this are "
+                    "treated as 'unknown' so a single early failure (cold "
+                    "start, one bad call) does not permanently starve the "
+                    "provider of traffic and prevent its circuit breaker "
+                    "from ever accumulating consecutive failures.",
+    )
     PROVIDER_METRICS_PERSIST: bool = Field(
         default=True, alias="DEVPILOT_PROVIDER_METRICS_PERSIST",
         description="Persist provider-metric snapshots to PostgreSQL when "
                     "DATABASE_URL is configured.",
+    )
+
+    # ─── Phase 20B: production reliability & operational hardening ───
+    # Provider reliability: health probing, recovery detection, adaptive
+    # timeouts, health-based selection, post-failure cooldown.
+    PROVIDER_HEALTH_PROBE_ENABLED: bool = Field(
+        default=True, alias="DEVPILOT_PROVIDER_HEALTH_PROBE_ENABLED",
+        description="Periodically issue minimal health probes to configured "
+                    "providers so outages are detected and recovery is "
+                    "observed without waiting for real traffic.",
+    )
+    PROVIDER_HEALTH_PROBE_INTERVAL_SECONDS: float = Field(
+        default=120.0, ge=0.0, le=86400.0,
+        alias="DEVPILOT_PROVIDER_HEALTH_PROBE_INTERVAL_SECONDS",
+        description="Seconds between automatic provider health probes. 0 "
+                    "disables the background probe loop entirely.",
+    )
+    PROVIDER_HEALTH_PROBE_TIMEOUT_SECONDS: float = Field(
+        default=10.0, ge=1.0, le=300.0,
+        alias="DEVPILOT_PROVIDER_HEALTH_PROBE_TIMEOUT_SECONDS",
+        description="Per-probe timeout. Probes are lightweight (tiny prompt, "
+                    "max_tokens=1) so a slow/cold-starting provider fails over "
+                    "fast instead of blocking the probe loop.",
+    )
+    PROVIDER_HEALTH_BASED_SELECTION: bool = Field(
+        default=True, alias="DEVPILOT_PROVIDER_HEALTH_BASED_SELECTION",
+        description="Prefer healthier providers within the configured "
+                    "priority order: healthy > warming > unknown > degraded, "
+                    "with unhealthy providers tried only as a last resort "
+                    "(smarter provider selection based on recent health).",
+    )
+    PROVIDER_ADAPTIVE_TIMEOUT_ENABLED: bool = Field(
+        default=True, alias="DEVPILOT_PROVIDER_ADAPTIVE_TIMEOUT_ENABLED",
+        description="Scale the per-call timeout from recent observed latency: "
+                    "effective timeout = max(base, avg_latency * multiplier) "
+                    "capped at PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS. "
+                    "Providers that have been answering slowly get a longer "
+                    "budget instead of timing out (request timeout "
+                    "optimization).",
+    )
+    PROVIDER_ADAPTIVE_TIMEOUT_MULTIPLIER: float = Field(
+        default=3.0, ge=1.0, le=100.0,
+        alias="DEVPILOT_PROVIDER_ADAPTIVE_TIMEOUT_MULTIPLIER",
+        description="Latency multiplier used for adaptive per-call timeouts.",
+    )
+    PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS: float = Field(
+        default=300.0, ge=1.0, le=600.0,
+        alias="DEVPILOT_PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS",
+        description="Ceiling for adaptive per-call timeouts. Keep it at or "
+                    "below the provider client's own transport timeout (e.g. "
+                    "DEVPILOT_NVIDIA_TIMEOUT_SECONDS) so the router's wait_for "
+                    "is not the tighter bound for a request the client would "
+                    "have completed.",
+    )
+    PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS: float = Field(
+        default=5.0, ge=0.0, le=3600.0,
+        alias="DEVPILOT_PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS",
+        description="Seconds a provider is skipped entirely after a failed "
+                    "attempt (configurable cooldown after failures — the "
+                    "provider recovers before being tried again).",
+    )
+    PROVIDER_WARM_UP_SECONDS: float = Field(
+        default=30.0, ge=0.0, le=3600.0,
+        alias="DEVPILOT_PROVIDER_WARM_UP_SECONDS",
+        description="Seconds a recovered provider is treated as 'warming up' "
+                    "(eligible, but ranked below fully-healthy providers) "
+                    "after a recovery is detected.",
+    )
+    PROVIDER_METRICS_PERSIST_INTERVAL_SECONDS: float = Field(
+        default=300.0, ge=5.0, le=86400.0,
+        alias="DEVPILOT_PROVIDER_METRICS_PERSIST_INTERVAL_SECONDS",
+        description="Seconds between automatic provider-metric snapshot "
+                    "persistence to PostgreSQL (independent of the probe "
+                    "loop).",
+    )
+
+    # Operational hardening: startup config validation + request limits.
+    STARTUP_VALIDATION_STRICT: bool = Field(
+        default=False, alias="DEVPILOT_STARTUP_VALIDATION_STRICT",
+        description="When True, fail fast (raise at startup) on configuration "
+                    "errors found by startup validation. When False, errors "
+                    "are logged and exposed via GET /api/v1/operations/"
+                    "startup-validation (and the CLI validate-config command) "
+                    "but the app still starts.",
+    )
+    MAX_REQUEST_BODY_BYTES: int = Field(
+        default=10_485_760, ge=1024, le=1_073_741_824,
+        alias="DEVPILOT_MAX_REQUEST_BODY_BYTES",
+        description="Maximum accepted HTTP request body size in bytes; larger "
+                    "bodies are rejected with 413 (request limits).",
     )
 
     @field_validator("PROVIDER_PRIORITY", mode="before")

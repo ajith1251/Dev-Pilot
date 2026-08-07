@@ -307,6 +307,16 @@ class ProviderHealth:
         self.retries = 0
         self.failovers = 0
         self.resumes = 0
+        # Phase 20B: recovery detection + passive health probing. Probes are
+        # deliberately kept OUT of the success-rate window so probing never
+        # distorts real-traffic health; they are counted separately.
+        self.recoveries = 0
+        self.last_recovery_at: Optional[float] = None
+        self.probes = 0
+        self.failed_probes = 0
+        self.last_probe_at: Optional[float] = None
+        self.last_probe_ok: Optional[bool] = None
+        self.warming_until: Optional[float] = None
         self.last_latency_ms: Optional[float] = None
         self.avg_latency_ms: Optional[float] = None  # exponential moving average
         self.last_success_at: Optional[float] = None
@@ -320,6 +330,16 @@ class ProviderHealth:
         self.results.append(1)
         self.consecutive_failures = 0
         self.last_success_at = time.time()
+        # A success following a bad spell (failures, an open/half-open circuit,
+        # or a degraded success rate) is a RECOVERY — observable, and the
+        # provider spends a short warm-up period ranked below healthy ones.
+        if self.last_failure_at is not None or self.last_probe_ok is False \
+                or self.last_recovery_at is not None:
+            self.record_recovery()
+        else:
+            rate = self.success_rate
+            if rate is not None and rate < 0.9 and self.successful_requests > 1:
+                self.record_recovery()
         if latency_ms is not None:
             self.last_latency_ms = latency_ms
             if self.avg_latency_ms is None:
@@ -349,6 +369,47 @@ class ProviderHealth:
     def record_resume(self) -> None:
         """Count a mid-stream prefix-resend (Phase 20B, token-loss recovery)."""
         self.resumes += 1
+
+    # ── Phase 20B: recovery detection & health probing ──────────
+
+    def record_recovery(self) -> None:
+        """Record that this provider recovered from a failure spell.
+
+        Idempotent per episode: called on the first success after a failure
+        (or after a failed probe), the counters stay frozen until the next
+        failure starts a fresh episode.
+        """
+        if self.last_recovery_at is not None and self.last_failure_at is None:
+            return
+        self.recoveries += 1
+        self.last_recovery_at = time.time()
+        self.last_failure_at = None
+
+    def record_probe(self, ok: bool, latency_ms: Optional[float] = None) -> None:
+        """Record a passive health-probe outcome (outside the traffic window)."""
+        self.probes += 1
+        if not ok:
+            self.failed_probes += 1
+            self.last_probe_ok = False
+        else:
+            self.last_probe_ok = True
+        self.last_probe_at = time.time()
+        if latency_ms is not None:
+            self.last_latency_ms = latency_ms
+            if self.avg_latency_ms is None:
+                self.avg_latency_ms = latency_ms
+            else:
+                self.avg_latency_ms = 0.9 * self.avg_latency_ms + 0.1 * latency_ms
+
+    def mark_warming(self, seconds: float) -> None:
+        """Mark the provider as warming up for ``seconds`` (post-recovery)."""
+        if seconds > 0:
+            self.warming_until = time.time() + seconds
+        else:
+            self.warming_until = None
+
+    def is_warming(self) -> bool:
+        return self.warming_until is not None and time.time() < self.warming_until
 
     @property
     def success_rate(self) -> Optional[float]:
@@ -389,6 +450,13 @@ class ProviderHealth:
             "retries": self.retries,
             "failovers": self.failovers,
             "resumes": self.resumes,
+            "recoveries": self.recoveries,
+            "last_recovery_at": self.last_recovery_at,
+            "probes": self.probes,
+            "failed_probes": self.failed_probes,
+            "last_probe_at": self.last_probe_at,
+            "last_probe_ok": self.last_probe_ok,
+            "warming": self.is_warming(),
             "avg_latency_ms": round(self.avg_latency_ms, 2)
                 if self.avg_latency_ms is not None else None,
             "last_latency_ms": round(self.last_latency_ms, 2)
@@ -414,6 +482,9 @@ class ProviderEntry:
     breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
     health: ProviderHealth = field(default_factory=lambda: ProviderHealth("p"))
     default_model: Optional[str] = None
+    # Phase 20B: post-failure cooldown — the provider is skipped entirely
+    # until this monotonic timestamp (configurable cooldown after failures).
+    cooldown_until: float = 0.0
 
     def snapshot(self, active: bool = False, status: str = "unknown") -> Dict[str, Any]:
         return {
@@ -469,6 +540,10 @@ class MetricsRegistry:
         """Count a mid-stream prefix-resend on a provider."""
         self.for_provider(name).record_resume()
 
+    def record_recovery(self, name: str) -> None:
+        """Record a recovery on a provider's health instance."""
+        self.for_provider(name).record_recovery()
+
     def totals(self) -> Dict[str, Any]:
         return {
             "total_requests": sum(h.total_requests for h in self._health.values()),
@@ -477,6 +552,8 @@ class MetricsRegistry:
             "retries": sum(h.retries for h in self._health.values()),
             "failovers": sum(h.failovers for h in self._health.values()),
             "resumes": sum(h.resumes for h in self._health.values()),
+            "recoveries": sum(h.recoveries for h in self._health.values()),
+            "probes": sum(h.probes for h in self._health.values()),
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -664,15 +741,105 @@ class ProviderRouter:
         The candidate set is the typed capability chain when one is configured
         for ``capability``, otherwise the global priority list — so per-call
         failover respects the capability's chain.
+
+        Phase 20B: when ``DEVPILOT_PROVIDER_HEALTH_BASED_SELECTION`` is on,
+        candidates are re-sorted by recent health (healthy > warming > unknown
+        > degraded > unhealthy) with priority as the stable tie-breaker, so a
+        degraded provider is only used when no healthier option exists and an
+        unhealthy provider is a last resort. Post-failure cooldown entries are
+        skipped entirely until their cooldown expires.
         """
         by_name = {e.name: e for e in self.entries}
+        now = self._now_fn()
+        cooldown_seconds = float(
+            getattr(self._settings, "PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS", 5.0)
+        )
         result: List[ProviderEntry] = []
         for name in self._candidate_names(capability):
             entry = by_name.get(name)
-            if entry is not None and entry.configured and entry.enabled \
-                    and not entry.breaker.is_circuit_open():
-                result.append(entry)
+            if entry is None or not entry.configured or not entry.enabled:
+                continue
+            if entry.breaker.is_circuit_open(now):
+                continue
+            if cooldown_seconds > 0 and entry.cooldown_until > now:
+                continue
+            result.append(entry)
+        if bool(getattr(self._settings, "PROVIDER_HEALTH_BASED_SELECTION", True)):
+            result.sort(key=self._selection_key)
         return result
+
+    # ── Phase 20B: smarter health-based selection ──────────────
+
+    def _health_rank(self, entry: ProviderEntry) -> int:
+        """Health rank used for selection ordering.
+
+        Lower ranks are tried first:
+
+            -1  recovering (half-open probe budget, or OPEN past cooldown —
+                 the circuit WANTS to probe, so the probe gets priority;
+                 otherwise health-based selection would starve the circuit
+                 breaker of its recovery probes)
+             0  healthy
+             1  warming (recently recovered)
+             2  unknown (no traffic yet)
+             3  degraded
+             4  unhealthy (closed circuit, low success rate) or OPEN
+        """
+        now = self._now_fn()
+        if entry.breaker.state is CircuitState.OPEN:
+            if not entry.breaker.is_circuit_open(now):
+                return -1  # past cooldown — due for a recovery probe
+            return 4
+        if entry.breaker.state is CircuitState.HALF_OPEN:
+            return -1  # probe budget active — admit the probe first
+        if entry.health.is_warming():
+            return 1
+        rate = entry.health.success_rate
+        # Phase 20B: rate-based ranks require a minimum sample count. A
+        # provider with one or two real-traffic samples (cold start, a single
+        # bad call) is 'unknown' — NOT 'unhealthy' — otherwise it would be
+        # permanently starved of traffic, its consecutive failures would
+        # never accumulate, and its circuit breaker could never trip.
+        min_samples = int(getattr(
+            self._settings, "PROVIDER_HEALTH_MIN_SAMPLES", 5))
+        if rate is None or len(entry.health.results) < min_samples:
+            return 2
+        if rate < float(self._settings.PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE):
+            return 4
+        if rate < float(self._settings.PROVIDER_HEALTH_DEGRADED_SUCCESS_RATE):
+            return 3
+        return 0
+
+    def _selection_key(self, entry: ProviderEntry) -> tuple:
+        """Deterministic sort key: (health rank, priority, avg latency)."""
+        latency = entry.health.avg_latency_ms
+        return (
+            self._health_rank(entry),
+            entry.priority,
+            latency if latency is not None else float("inf"),
+        )
+
+    def _effective_timeout(self, entry: ProviderEntry) -> float:
+        """Phase 20B request-timeout optimization: adaptive per-provider timeout.
+
+        Base timeout stays ``DEVPILOT_PROVIDER_TIMEOUT_SECONDS``; when adaptive
+        timeouts are enabled and the provider has measured latency, the budget
+        is ``max(base, avg_latency * multiplier)`` capped at
+        ``PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS``. A provider that has been
+        answering slowly gets a realistic budget instead of timing out.
+        """
+        base = self._timeout_seconds
+        if not bool(getattr(self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_ENABLED", True)):
+            return base
+        avg = entry.health.avg_latency_ms
+        if avg is None:
+            return base
+        multiplier = float(
+            getattr(self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_MULTIPLIER", 3.0))
+        ceiling = float(
+            getattr(self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS", 300.0))
+        adaptive = (avg / 1000.0) * multiplier
+        return max(base, min(ceiling, adaptive))
 
     def _set_active(self, name: str) -> None:
         self._active_provider = name
@@ -693,14 +860,33 @@ class ProviderRouter:
         attempt = 0
         while True:
             started = time.monotonic()
+            # Phase 20B recovery detection: capture the bad-spell signal BEFORE
+            # record_success clears it (success after recorded failures, a
+            # failed probe, or a non-closed circuit is a recovery — observed
+            # and surfaced in metrics; the provider then spends a short
+            # warm-up period ranked below fully-healthy ones).
+            was_recovering = (
+                entry.breaker.state is not CircuitState.CLOSED
+                or entry.health.consecutive_failures > 0
+                or entry.health.last_probe_ok is False
+            )
             try:
                 result = await asyncio.wait_for(
                     entry.provider.chat(messages, config),  # type: ignore[union-attr]
-                    timeout=self._timeout_seconds,
+                    timeout=self._effective_timeout(entry),
                 )
                 latency_ms = (time.monotonic() - started) * 1000.0
                 entry.health.record_success(latency_ms)
                 entry.breaker.record_success()
+                if was_recovering:
+                    entry.health.mark_warming(float(
+                        getattr(self._settings, "PROVIDER_WARM_UP_SECONDS", 30.0)))
+                    self.metrics.record_recovery(entry.name)
+                    logger.info(
+                        "[router] provider %s recovered — warming up %.0fs",
+                        entry.name,
+                        getattr(self._settings, "PROVIDER_WARM_UP_SECONDS", 30.0),
+                    )
                 return result
             except Exception as exc:
                 latency_ms = (time.monotonic() - started) * 1000.0
@@ -722,6 +908,13 @@ class ProviderRouter:
                         await self._sleep(delay)
                     attempt += 1
                     continue
+                # Post-failure cooldown: skip this provider entirely for a
+                # configurable window so failover does not immediately re-try
+                # a provider that just failed (it needs a beat to recover).
+                cooldown = float(
+                    getattr(self._settings, "PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS", 5.0))
+                if cooldown > 0:
+                    entry.cooldown_until = self._now_fn() + cooldown
                 raise ProviderCallFailedError(
                     provider=entry.name,
                     kind=kind.value,
@@ -767,7 +960,7 @@ class ProviderRouter:
                     next_name = entries[index + 1].name
                     self.metrics.record_failover(entry.name, next_name, exc.kind)
                     logger.warning(
-                        "[router] failover %s → %s (%s)",
+                        "[router] failover %s -> %s (%s)",
                         entry.name, next_name, exc.kind,
                     )
 
@@ -853,6 +1046,10 @@ class ProviderRouter:
                 kind = classify_failure(exc)
                 entry.health.record_failure(0)
                 entry.breaker.record_failure()
+                cooldown = float(
+                    getattr(self._settings, "PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS", 5.0))
+                if cooldown > 0:
+                    entry.cooldown_until = self._now_fn() + cooldown
                 if yielded_any and resume_budget > 0 and index + 1 < len(entries):
                     resume_budget -= 1
                     next_name = entries[index + 1].name
@@ -879,6 +1076,74 @@ class ProviderRouter:
                 raise AllProvidersFailedError(
                     "All providers failed while starting a stream."
                 ) from exc
+
+    # ── Phase 20B: automatic health probing ─────────────────────
+
+    async def probe_provider(self, name: str) -> Optional[bool]:
+        """Probe one configured provider with a minimal chat call.
+
+        Probes are PASSIVE: they do not trip the circuit breaker and do not
+        enter the traffic success-rate window (health probing must not distort
+        real-traffic health). A probe success after a failure spell is a
+        recovery; a probe failure only updates probe counters + the last probe
+        outcome so the probe loop can track availability over time.
+
+        Returns True/False on success/failure, None when the provider is not
+        configured or has no runtime instance.
+        """
+        entry = next((e for e in self.entries if e.name == name), None)
+        if entry is None or not entry.configured or not entry.enabled \
+                or entry.provider is None:
+            return None
+        probe_timeout = float(
+            getattr(self._settings, "PROVIDER_HEALTH_PROBE_TIMEOUT_SECONDS", 10.0))
+        probe_config = LLMConfig(temperature=0.0, max_tokens=1)
+        # Capture the bad-spell signal BEFORE the probe call (a probe success
+        # flips last_probe_ok to True, which would hide the recovery).
+        was_failing = (
+            entry.health.last_failure_at is not None
+            or entry.breaker.state is not CircuitState.CLOSED
+            or entry.health.last_probe_ok is False
+        )
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                entry.provider.chat(
+                    [LLMMessage(role="user", content="Reply with: ok")],
+                    probe_config,
+                ),
+                timeout=probe_timeout,
+            )
+            latency_ms = (time.monotonic() - started) * 1000.0
+            entry.health.record_probe(True, latency_ms)
+            if was_failing:
+                entry.health.record_recovery()
+                entry.health.mark_warming(float(
+                    getattr(self._settings, "PROVIDER_WARM_UP_SECONDS", 30.0)))
+                self.metrics.record_recovery(entry.name)
+                logger.info("[router] probe: provider %s recovered", entry.name)
+            return True
+        except Exception as exc:
+            entry.health.record_probe(False)
+            logger.warning(
+                "[router] probe: provider %s unreachable (%s)",
+                name, str(exc)[:150],
+            )
+            return False
+
+    async def probe_all(self) -> Dict[str, bool]:
+        """Probe every configured, enabled, non-probe-exempt provider.
+
+        Runs probes sequentially (providers are few; sequential keeps the
+        probe loop deterministic and avoids bursting the network). Returns
+        name → result (True/False/None) for observability.
+        """
+        results: Dict[str, bool] = {}
+        for entry in self.entries:
+            if not entry.configured or not entry.enabled or entry.provider is None:
+                continue
+            results[entry.name] = await self.probe_provider(entry.name)
+        return results
 
     # ── Observability snapshots (secret-safe) ────────────────────
 
@@ -958,16 +1223,37 @@ class ProviderRouter:
                 "failure_threshold": self._breaker_kwargs["failure_threshold"],
                 "cooldown_seconds": self._breaker_kwargs["cooldown_seconds"],
                 "half_open_max_calls": self._breaker_kwargs["half_open_max_calls"],
-            },
-            "health": {
-                "window": self._health_window,
-                "degraded_success_rate": float(
-                    self._settings.PROVIDER_HEALTH_DEGRADED_SUCCESS_RATE),
-                "unhealthy_success_rate": float(
-                    self._settings.PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE),
-            },
+            },                "health": {
+                    "window": self._health_window,
+                    "min_samples": int(getattr(
+                        self._settings, "PROVIDER_HEALTH_MIN_SAMPLES", 5)),
+                    "degraded_success_rate": float(
+                        self._settings.PROVIDER_HEALTH_DEGRADED_SUCCESS_RATE),
+                    "unhealthy_success_rate": float(
+                        self._settings.PROVIDER_HEALTH_UNHEALTHY_SUCCESS_RATE),
+                },
             "stream_resume_max": max(
                 0, int(getattr(self._settings, "PROVIDER_STREAM_RESUME_MAX", 3))),
+            "reliability": {
+                "health_probe_enabled": bool(getattr(
+                    self._settings, "PROVIDER_HEALTH_PROBE_ENABLED", True)),
+                "health_probe_interval_seconds": float(getattr(
+                    self._settings, "PROVIDER_HEALTH_PROBE_INTERVAL_SECONDS", 120.0)),
+                "health_probe_timeout_seconds": float(getattr(
+                    self._settings, "PROVIDER_HEALTH_PROBE_TIMEOUT_SECONDS", 10.0)),
+                "health_based_selection": bool(getattr(
+                    self._settings, "PROVIDER_HEALTH_BASED_SELECTION", True)),
+                "adaptive_timeout_enabled": bool(getattr(
+                    self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_ENABLED", True)),
+                "adaptive_timeout_multiplier": float(getattr(
+                    self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_MULTIPLIER", 3.0)),
+                "adaptive_timeout_max_seconds": float(getattr(
+                    self._settings, "PROVIDER_ADAPTIVE_TIMEOUT_MAX_SECONDS", 300.0)),
+                "cooldown_after_failure_seconds": float(getattr(
+                    self._settings, "PROVIDER_COOLDOWN_AFTER_FAILURE_SECONDS", 5.0)),
+                "warm_up_seconds": float(getattr(
+                    self._settings, "PROVIDER_WARM_UP_SECONDS", 30.0)),
+            },
             "providers": availability,
         })
         # Provider names are not secrets — expose them verbatim (the generic

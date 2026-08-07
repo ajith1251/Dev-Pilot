@@ -5,7 +5,7 @@
  * `auxiliary_repositories` + `repo_validation` surface.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { orgApi, runsApi } from "./client";
+import { operationsApi, orgApi, runsApi } from "./client";
 
 function mockFetch(json: unknown) {
   const fn = vi.fn().mockResolvedValue({
@@ -88,6 +88,75 @@ describe("runsApi.create (Phase 20 A6)", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.acceptance_criteria).toEqual(["c1", "c2"]);
     expect(body.execution_budget).toEqual({ max_iterations: 3, max_replans: 2 });
+  });
+});
+
+describe("operationsApi (Phase 20B)", () => {
+  it("GETs /api/v1/operations/status and surfaces the readiness summary", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        summary: {
+          ready: true,
+          status: "ok",
+          error_subsystems: {},
+          checked_at: "2026-08-07T00:00:00Z",
+        },
+        subsystems: {
+          providers: { status: "ok", detail: { configured_count: 3 } },
+          database: { status: "unknown", detail: { configured: false } },
+        },
+      },
+    });
+    const result = await operationsApi.status();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/operations/status");
+    expect(result.data.summary.ready).toBe(true);
+    expect(result.data.subsystems.providers.status).toBe("ok");
+  });
+
+  it("GETs /api/v1/operations/metrics with run/resource sections", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        uptime_seconds: 42.5,
+        runs: { active: 1, started_total: 3, completed_total: 2 },
+        resources: { memory_mb: 128.4, active_ws_connections: 2, open_tasks: 9 },
+        recorded_at: 123,
+      },
+    });
+    const result = await operationsApi.metrics();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/operations/metrics");
+    expect(result.data.runs.completed_total).toBe(2);
+    expect(result.data.resources.active_ws_connections).toBe(2);
+  });
+
+  it("GETs /api/v1/operations/startup-validation findings", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        strict: false,
+        error_count: 0,
+        warning_count: 1,
+        findings: [{ severity: "warning", code: "CONFIG_NO_PROVIDER_KEYS", message: "no keys" }],
+      },
+    });
+    const result = await operationsApi.startupValidation();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/operations/startup-validation");
+    expect(result.data.findings[0].code).toBe("CONFIG_NO_PROVIDER_KEYS");
+  });
+
+  it("fetches the /health/ready readiness probe", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      status: "ok",
+      ready: true,
+      error_subsystems: {},
+      checked_at: "2026-08-07T00:00:00Z",
+    });
+    const result = await operationsApi.ready();
+    expect(fetchMock.mock.calls[0][0]).toBe("/health/ready");
+    expect(result.ready).toBe(true);
   });
 });
 
