@@ -8,6 +8,7 @@ pure-function behaviour directly; agent-level tests cover the wiring.
 from app.agents.json_repair import (
     extract_json_object,
     fix_single_quotes,
+    fix_triple_quoted_strings,
     mask_string_contents,
     parse_llm_json,
     repair_json_text,
@@ -113,6 +114,42 @@ class TestRepairJsonText:
         assert parsed["summary"] == "s"
         assert parsed["steps"] == [{"id": "STEP-001", "title": "t"}]
         assert parsed["requirements_coverage"] == {"REQ-001": ["STEP-001"]}
+
+    def test_triple_quoted_code_value(self):
+        """Python triple-quoted ``new_content`` (with raw newlines, braces and
+        an inner docstring) must be normalized to a JSON string literal."""
+        text = (
+            '{"status": "proposed", "changes": [{"path": "calc.py", '
+            '"new_content": """class Calc:\n'
+            '    """Docstring."""\n'
+            '    def run(self):\n'
+            '        return f"val_{self.x}"\n'
+            '"""}]}'
+        )
+        repaired = repair_json_text(text)
+        assert repaired is not None
+        data = json.loads(repaired)
+        nc = data["changes"][0]["new_content"]
+        assert 'class Calc:' in nc
+        assert 'Docstring.' in nc  # inner docstring survived (did not close early)
+        assert 'f"val_{self.x}"' in nc  # braces inside the value preserved
+
+    def test_triple_quoted_single_quote_variant(self):
+        text = "{'status': 'proposed', 'new_content': '''line1\nline2'''}"
+        repaired = repair_json_text(text)
+        assert repaired is not None
+        data = json.loads(repaired)
+        assert data["new_content"] == "line1\nline2"
+
+    def test_triple_quote_inside_valid_string_untouched(self):
+        """A triple-quote sequence NOT in a value position (already-escaped,
+        inside a valid JSON string) must pass through unchanged."""
+        text = '{"doc": "use \\\"\\\"\\\" for python", "a": 1}'
+        assert json.loads(repair_json_text(text)) == {"doc": 'use """ for python', "a": 1}
+
+    def test_triple_quote_escaped_quotes_round_trip(self):
+        valid = '{"d": "say \\"hi\\""}'
+        assert json.loads(fix_triple_quoted_strings(valid)) == {"d": 'say "hi"'}
 
 
 class TestExtractJsonObject:

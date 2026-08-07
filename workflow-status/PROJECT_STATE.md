@@ -1,6 +1,8 @@
 # DevPilot Project State
 
-> **Last updated**: August 7, 2026 (session 45 — **Phase 20B Production Reliability & Operational Hardening COMPLETE**)
+> **Last updated**: August 7, 2026 (session 46 — **Priority 1 Live Model Quality Benchmark COMPLETE + LIVE E2E APPROVED**)
+> **Session 46 LIVE E2E GREEN (same day)**: the benchmark-recommended capability chains were wired into the live `.env` (`DEVPILOT_LLM_PROVIDER_FALLBACKS` JSON form — analysis/planning/coding/testing/review/reasoning → gemini→opencode_zen→ollama_cloud, planning also tails nvidia) and `scripts/demo_phase17.py --live` ran end-to-end: **Demonstrations A–E ALL PASS**, autonomy goal `GOAL-40B3F4A9` completed with 3 consensus topics, restart recovery + notebook persistence verified, and the live `execute_run` reached a terminal verdict of **APPROVED** (criteria 2/2) — the first fully green *approve* run (Session 44's live coding stage always rejected; the JSON-repair fix + model chains unblocked it). Along the way fixed a real Session-34 validator bug: `DEVPILOT_LLM_PROVIDER_FALLBACKS` dict values from `.env` (JSON-decoded lists) were mangled by `str(list).split(",")` — list values are now handled directly (+1 regression test in `test_provider_router.py`); `.env.example` corrected to document the JSON-dict form (the `cap:prov1` string form only works programmatically).
+> **Priority 1 (Session 46)**: live model benchmark (`scripts/benchmark_models.py`) — 6 providers × 11 models, 5 identical probes scored through the real deterministic gates; **100% sweep**: `gemini-3.5-flash-lite` (fastest), `gemini-3.6-flash`, `ollama_cloud gpt-oss:120b`, `ollama_cloud gemma4:31b`, `opencode_zen deepseek-v4-flash-free` (free); **current live default `nvidia meta/llama-3.1-8b-instruct` FAILS coding+repair JSON** (root cause of Session-44 live coding rejections); `deepseek-r1` 404s / `deepseek-v4-flash` 401s; FixAgent lacks the `repair_json_text` fallback (top hardening rec). Config-only guidance applied to `.env.example` (paid-model pins + per-stage capability chains). Report: `workflow-status/LIVE_MODEL_QUALITY_REPORT.md`. Phase 20 still COMPLETE — Phase 21 not started.
 > **Current Phase**: Phase 20 COMPLETE ✅ — **Phase 20B (production reliability & operational hardening) DONE Session 45**: provider reliability (automatic health probing `ProviderHealthProbe`, recovery detection + warm-up, configurable post-failure cooldown, health-based selection with a minimum-sample guard, adaptive request timeouts, circuit probe priority — all in `ProviderRouter`), operational resilience (transient network/rate-limit/cold-start/PG-reconnect/WS-reconnect handling), resource-management audit (async task cleanup, WS lifecycle + per-channel counts, workspace create/cleanup, bounded metric windows), observability (`SystemMetricsService` run throughput/repo processing/autonomy durations/memory/WS counters + correlation-ID structured logging via `app/core/context.py` + `middleware.py`), startup configuration validation (`app/core/startup_validation.py` + `python -m app.cli validate-config` + `DEVPILOT_STARTUP_VALIDATION_STRICT`), security hardening (request-size limit 413, redacted responses), enhanced health endpoints (`/health/live` + `/health/ready` shared subsystem matrix), Operations Dashboard `/dashboard/operations` (live provider status, failover history, active runs, queue stats, PG/WS/resources, startup findings — no mock data), background `ProviderMetricsPersistence` loop; 50 new backend tests (`test_phase20b_provider_reliability.py` 19 + `test_phase20b_operations.py` 17 + `test_startup_validation.py` 14) + 4 new frontend client tests (frontend vitest **67 passed**), `next build` EXIT=0, `scripts/demo_phase20b.py` demos A–F **ALL PASS** (provider outage→recovery, DB reconnect, leak-free long run, live ops dashboard, accurate health endpoints, graceful shutdown + restart recovery). Docs: `docs/PRODUCTION_RELIABILITY.md`, report: `workflow-status/PHASE20B_COMPLETION_REPORT.md`. **Phase 20 is COMPLETE — do NOT begin Phase 21.** — **Phase 20A6 full dashboard DONE Session 40**: the complete multi-repository user experience — `backend/app/services/run_dashboard.py` (repository-aware view builder: `build_repository_view` per-repo status cards + six-stage per-repo timeline, `build_organization_summary` org-level execution summary; duck-typed for `DevPilotRun` + `DevPilotRunResult`; evidence-only, run-scoped isolation), API/WS/CLI all consume the builders (`GET /runs/{id}` + `POST /runs` + WS broadcast carry `repositories` + `organization_summary`; run list `repository_count`; `POST /runs` accepts `acceptance_criteria` + `execution_budget`), org repositories search/filter/pagination + per-repo stats endpoint, `RepositorySelector`/`RepositoryStatusCards`/`RepositoryTimeline`/`OrganizationSummary`/`RunHistoryPanel` frontend components + `CreateRunModal` criteria/budget/ordering/relationships, **restart recovery** (PostgresRunStore round-trips `repository_path`/`auxiliary_repositories`/`repo_patches` so the dashboard rebuilds identically after restart), 25 new backend tests (`test_phase20a6_dashboard.py`) + 14 new frontend vitest — backend **1681 passed / 17 skipped / 1 pre-existing env failure**, frontend **63 passed**, `next build` EXIT=0, `demo_phase20.py` demos A–M ALL PASS (PG verified). Report: `PHASE20A6_COMPLETION_REPORT.md`. (Earlier in Phase 20: E DONE Session 38 unittest XML / Vitest JSON / Jest JSON parsers; B1 DONE Session 37 `DEVPILOT_GEMINI_TIER` paid tier; B2 DONE Session 34 typed per-capability fallback chains; B3 DONE Session 35 mid-stream token-loss failover; D DONE Session 36 org-graph UI parity; A1+A2 Session 28 commit `0954604`, A3 Session 29 `895dad5`, A4 Session 31 `e1fc08e`, A5 Session 32, A6 Session 33 run-detail surface). Prior: Phase 19C COMPLETE ✅ — interactive EKG visualization (Session 26), multi-repo remote acquisition + org-graph UI wiring + org-scope queries (Session 27, commit `1644fb3`), demo-H stale-PG fix (`select_tests_for_changes` scoping, commit `2cc929b`). Earlier: Phase 19B COMPLETE ✅ (multi-provider failover), Phase 18 COMPLETE + Phase 19 items — EKG ✅, semantic EKG retrieval ✅, EKG-driven test selection (Phase 12d closure) ✅
 > **Total tests**: **1896 passed / 17 skipped / 2 failed** (Session-43 baseline 1769 + 50 new Phase 20B backend tests = 1842 deterministic `-m "not live and not integration"`, PLUS the 54-test integration suite `-m integration` run against live PostgreSQL — both 54/54 green; the 2 failures remain pre-existing and unrelated: the `test_wrapper_skips_cleanly_without_provider` env quirk and the org-graph PG round-trip hitting the accumulated 64-repository org limit). Organization-graph suite: **60 passed** (incl. multi-repo acquisition; roundtrip test idempotent against accumulated PG data). Phase 20: **98 new backend tests** — A1+A2: 10 (`test_phase20_multi_repo_run.py`), A3: 7 (3 engine-level in `test_organization_graph.py` + 4 orchestrator-level in `test_phase20_multi_repo_run.py`), A4: 21 (`test_phase20_repo_scope.py`), A5: 15 (`test_phase20_repo_ingestion.py` — 13 ingestion + 2 run-detail API surface), **A6 dashboard: 25 (`test_phase20a6_dashboard.py` — view builder both shapes, org summary, API sanitize/create/list, org repositories search/filter/pagination + per-repo stats, WS broadcast payload, CLI `--json`, PostgresRunStore A6 round-trip)**. Phase 20B: **29 new tests** — B1: 12, B2: 12, B3: 5 (`test_provider_router.py` now 60). Phase 20E: **12 new tests** in `test_testing.py`. Phase 20F (Session 43): **7 new `test_provider_registry.py`** + Cloudflare/OpenAI-compatible provider tests in `test_llm_providers.py` + `TestPhase20FProviders`/`TestProviderDisable` in `test_provider_router.py`. Frontend vitest **63 passed (8 files)** (49 prior + 11 `repositoryStatusModel` mappers + 3 client additions). `scripts/demo_phase20.py` demos A–M ALL PASS.
 > **Live run-API validation**: `scripts/verify_api_durability.py --live` runs ONE real `execute_run` through the HTTP API (`POST /api/v1/runs`) against Gemini + live PG — all 11 stages flow, runs/handoffs/consensus persist via PostgresRunStore, restart recovery rehydrates; surfaced + fixed two raw-path bugs (INITIALIZING→ACQUIRING_REPOSITORY advance, `_stage_analysis` await)
@@ -2969,4 +2971,69 @@ so the live coding patch passes the fixture tests — the pipeline already
 proves rejection correctly, a fully green *approve* run is the last polish;
 3) enterprise roadmap workstream E1 (self-hosted inference fabric).
 
+
+### Session 46 (August 7, 2026) — Priority 1: Live Model Quality Benchmark ✅
+
+The remaining live weakness was **coding quality, not architecture** —
+quantified and fixed with configuration only (no architecture change).
+
+**New harness** — `backend/scripts/benchmark_models.py`: benchmarks every
+CONFIGURED provider (registry-derived, same gate as `check_live_mode`) on
+IDENTICAL engineering tasks, scoring outputs through the SAME deterministic
+gates the pipeline uses. Probes: **plan** (real planner prompts →
+`ImplementationPlan` → `PlanValidator`), **coding** (real `CodingAgent` → hash
+enrichment → `PatchValidator` → `SafePatchEngine.apply` → fixture pytest —
+suite must be fully green = real bug fixed), **repair** (real `FixAgent` →
+proposal → enrichment → validation → apply → pytest), **review** (real
+`ReviewerAgent` LLM mode → evidence-validated findings), **json** (strict JSON
+adherence, first-try + `repair_json_text`). CI-safe (exits 0 when no live
+provider is configured); `--providers/--models/--probes/--json/--report`.
+
+**Task** — the fixture ships with one genuinely failing test
+(`test_validate_expired_token`: a token created with `token_expiry_hours=0`
+expires instantly but must validate). 6 providers × 11 model configs ran all 5
+probes live.
+
+**Results** — full table in `workflow-status/LIVE_MODEL_QUALITY_REPORT.md`.
+- **100% sweep (all 5 probes + coding bug-fix gate):** `gemini-3.5-flash-lite`
+  (5.0s avg — fastest overall), `gemini-3.6-flash` (6.0s), `ollama_cloud`
+  `gpt-oss:120b` (15.4s), `ollama_cloud` `gemma4:31b` (17.6s), `opencode_zen`
+  `deepseek-v4-flash-free` (35.5s — the only free 100% performer).
+- **Coding gate FAILS:** nvidia `meta/llama-3.1-8b-instruct` (the CURRENT live
+  default — JSON unparseable even after repair; direct cause of the Session-44
+  live coding rejections), nvidia nemotron-49b (43s avg, invalid JSON), cloudflare
+  `llama-4-scout` (doubled-brace persists on the big coding prompt), openrouter
+  `poolside:free` (no JSON), nvidia `deepseek-r1` (**404** — slug not served),
+  `opencode_zen deepseek-v4-flash` (**401** — no payment method).
+- **Repair:** 8/11 pass. nvidia 8b/49b failed because `FixAgent._extract_json`
+  lacked the Session-44 `repair_json_text` fallback — **FIXED after the
+  benchmark**: (a) `FixAgent._extract_json` routes every extracted candidate
+  through `repair_json_text`; (b) `json_repair.py` gained a new base pass
+  `fix_triple_quoted_strings` for the real nvidia-8b failure mode — models
+  emit `new_content` as Python triple-quoted blocks (`"""..."""` with raw
+  newlines + inner docstrings). Live repair probe: **`meta/llama-3.1-8b-instruct`
+  went 0% → 100%**; nemotron-49b still fails (emits array-of-lines with `#`
+  comments — not JSON-shaped, rejected by schema) and stays do-not-recommend.
+  7 new tests (4 json_repair incl. triple-quote value/docstring heuristics +
+  3 FixAgent regressions: doubled-brace extract, execute-level doubled-brace,
+  and execute-level triple-quoted-content pinned to the real nvidia response).
+
+**Config guidance applied (no architecture change)** — `.env.example` updated:
+`DEVPILOT_GEMINI_PAID_MODELS=gemini-3.5-flash-lite,gemini-3.6-flash` (replaces
+the wrong `gemini-3.6-pro-preview`), and the recommended per-stage capability
+chains — `coding:gemini,opencode_zen,ollama_cloud`;
+`planning:gemini,opencode_zen,ollama_cloud,nvidia`;
+`testing:gemini,opencode_zen`; `review:gemini,ollama_cloud`;
+`analysis:gemini`; `reasoning:gemini`. Live `.env` untouched (git-ignored,
+user-owned).
+
+**Status** — report `LIVE_MODEL_QUALITY_REPORT.md` written; only new code is
+the benchmark harness (tooling, not architecture). Phase 20 remains COMPLETE;
+Phase 21 NOT started. Committed as Session-46 tree (pending review).
+
+**Next:** 1) commit the Session-46 tree (benchmark harness + report + config
+validator fix + JSON-repair fixes + live E2E verification); 2) optionally extend
+`fix_triple_quoted_strings` for array-of-lines `new_content` (nemotron-49b's
+residual failure) or promote `verify_api_durability.py --live` to double-check
+the API path on the new chains; 3) enterprise roadmap workstream E1.
 

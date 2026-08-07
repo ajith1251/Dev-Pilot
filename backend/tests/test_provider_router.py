@@ -800,6 +800,25 @@ class TestProviderFallbacksConfig:
         s = Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS="Coding:GEMINI,OpenAI")
         assert s.LLM_PROVIDER_FALLBACKS == {"coding": ["gemini", "openai"]}
 
+    def test_json_dict_list_values_from_env(self) -> None:
+        """The .env JSON-dict form (pydantic-settings decodes complex fields
+        as JSON before validators run) must yield clean provider lists — not
+        the repr of the list split on commas. pydantic-settings MERGES dict
+        fields across sources, so assert on the merged keys' values."""
+        from app.config import Settings
+
+        s = Settings(DEVPILOT_LLM_PROVIDER_FALLBACKS={
+            "planning": ["anthropic", "gemini"],
+            "coding": ["gemini", "opencode_zen"],
+        })
+        fb = s.LLM_PROVIDER_FALLBACKS
+        assert fb["planning"] == ["anthropic", "gemini"]
+        assert fb["coding"] == ["gemini", "opencode_zen"]
+        assert all(
+            not p.startswith("[")
+            for items in fb.values() for p in items
+        ), f"mangled list repr in: {fb}"
+
     def test_stream_resume_max_parses(self) -> None:
         from app.config import Settings
 

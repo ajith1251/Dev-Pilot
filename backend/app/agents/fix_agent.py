@@ -31,6 +31,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.agents.base import BaseAgent
+from app.agents.json_repair import repair_json_text
 from app.config import settings
 from app.llm.base import BaseLLMProvider, LLMConfig, LLMMessage, LLMResponse
 from app.llm.factory import factory as llm_factory
@@ -496,12 +497,16 @@ class FixAgent(BaseAgent[FixAgentInput, FixAgentOutput]):
 
     @staticmethod
     def _extract_json(text: str) -> Optional[str]:
-        """Extract JSON from text, handling markdown code fences."""
+        """Extract JSON from text, handling markdown code fences and applying
+        the Session-44 JSON-repair pipeline (parity with CodingAgent /
+        PlannerAgent): doubled structural braces, trailing commas, unquoted
+        keys, smart quotes and bare None/True/False from weaker models."""
         # Try ```json ... ``` blocks
         json_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
         matches = re.findall(json_pattern, text, re.DOTALL)
         if matches:
-            return matches[0].strip()
+            candidate = matches[0].strip()
+            return repair_json_text(candidate) or candidate
 
         # Try finding { ... }
         start_idx = text.find("{")
@@ -513,6 +518,8 @@ class FixAgent(BaseAgent[FixAgentInput, FixAgentOutput]):
                 elif text[i] == "}":
                     depth -= 1
                     if depth == 0:
-                        return text[start_idx: i + 1]
+                        candidate = text[start_idx: i + 1]
+                        return repair_json_text(candidate) or candidate
 
-        return None
+        # Last resort: run the full repair pipeline over the raw response.
+        return repair_json_text(text)

@@ -888,6 +888,140 @@ class TestFixAgent:
         output = await agent.execute(inp)
         assert output.proposal.status == RepairProposalStatus.INSUFFICIENT_CONTEXT
 
+    def test_extract_json_repairs_doubled_braces(self):
+        """_extract_json applies the Session-44 repair pipeline (parity with
+        CodingAgent/PlannerAgent): doubled structural braces emitted by weaker
+        models (e.g. llama-4-scout) on large prompts must come back parseable."""
+        import json
+
+        from app.agents.fix_agent import FixAgent
+
+        # Model wrapped its JSON in extra structural braces + prose.
+        text = (
+            "Here is the fix: {{\n"
+            '  "status": "proposed",\n'
+            '  "changes": [{"operation": "MODIFY", "path": "calc.py", '
+            '"new_content": "x = 1"}]\n'
+            "}}\n"
+        )
+        extracted = FixAgent._extract_json(text)
+        assert extracted is not None
+        data = json.loads(extracted)
+        assert data["status"] == "proposed"
+        assert data["changes"][0]["path"] == "calc.py"
+
+    @pytest.mark.asyncio
+    async def test_execute_recovers_doubled_braces_response(self):
+        """A doubled-brace LLM response must now yield a PROPOSED repair instead
+        of INSUFFICIENT_CONTEXT (regression: live nvidia 8b/49b repair failures
+        were exactly this class — the extract found the block but json.loads
+        failed on it, and no repair fallback existed)."""
+        from app.agents.fix_agent import FixAgent, FixAgentInput
+
+        mock_provider = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = (
+            "{{\n"
+            '  "status": "proposed",\n'
+            '  "reason": "Add a minimum validity floor",\n'
+            '  "expected_effect": "fresh tokens validate",\n'
+            '  "changes": [{\n'
+            '    "operation": "MODIFY",\n'
+            '    "path": "calc.py",\n'
+            '    "new_content": "def is_positive(n): return n >= 0\\n",\n'
+            '    "reason": "floor fix"\n'
+            "  }]\n"
+            "}}\n"
+        )
+        mock_provider.chat = AsyncMock(return_value=mock_response)
+
+        agent = FixAgent(llm_provider=mock_provider)
+
+        diagnosis = FailureDiagnosis(
+            diagnosis_id="diag-001",
+            run_id="run-001",
+            category=FailureCategory.ASSERTION_FAILURE,
+            summary="Test failed",
+            repairability=Repairability.REPAIRABLE,
+        )
+        inp = FixAgentInput(
+            diagnosis=diagnosis,
+            test_result=TestRunResult(
+                run_id="run-001", workspace_id="ws-001",
+                status=ExecutionStatus.FAILED,
+            ),
+            failures=[],
+            attempt_number=1,
+        )
+
+        output = await agent.execute(inp)
+        assert output.proposal.status == RepairProposalStatus.PROPOSED
+        assert output.proposal.patch is not None
+        assert len(output.proposal.patch.changes) == 1
+        assert output.proposal.patch.changes[0].path == "calc.py"
+
+    @pytest.mark.asyncio
+    async def test_execute_recovers_triple_quoted_content_response(self):
+        """Regression pinned to the REAL live nvidia llama-3.1-8b failure: the
+        model emits ``new_content`` as a Python triple-quoted block (raw
+        newlines, inner docstring, braces) instead of an escaped JSON string.
+        The triple-quote repair must yield a PROPOSED repair with the code
+        content preserved."""
+        from app.agents.fix_agent import FixAgent, FixAgentInput
+
+        mock_provider = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = (
+            "### PROPOSED REPAIR PATCH\n\n"
+            "```json\n"
+            '{\n  "status": "proposed",\n'
+            '  "reason": "Enforce minimum validity floor",\n'
+            '  "changes": [{\n'
+            '    "operation": "MODIFY",\n'
+            '    "path": "auth/service.py",\n'
+            '    "new_content": """class AuthService:\n'
+            '    def create_token(self, user_id: str) -> str:\n'
+            '        """Create a new authentication token for a user."""\n'
+            '        token = f"tok_{user_id}_{datetime.utcnow().timestamp()}"\n'
+            '        self._tokens[token] = {\n'
+            '            "expires_at": datetime.utcnow() + timedelta(\n'
+            '                hours=max(self.token_expiry_hours, 1))\n'
+            '        }\n'
+            '        return token\n'
+            '    """,\n'
+            '    "reason": "Fixed instantly-expired tokens"\n'
+            "  }]\n"
+            "}\n"
+            "```\n\n### REASONING\n...\n"
+        )
+        mock_provider.chat = AsyncMock(return_value=mock_response)
+
+        agent = FixAgent(llm_provider=mock_provider)
+        diagnosis = FailureDiagnosis(
+            diagnosis_id="diag-001",
+            run_id="run-001",
+            category=FailureCategory.ASSERTION_FAILURE,
+            summary="Test failed",
+            repairability=Repairability.REPAIRABLE,
+        )
+        inp = FixAgentInput(
+            diagnosis=diagnosis,
+            test_result=TestRunResult(
+                run_id="run-001", workspace_id="ws-001",
+                status=ExecutionStatus.FAILED,
+            ),
+            failures=[],
+            attempt_number=1,
+        )
+
+        output = await agent.execute(inp)
+        assert output.proposal.status == RepairProposalStatus.PROPOSED
+        assert output.proposal.patch is not None
+        change = output.proposal.patch.changes[0]
+        assert change.path == "auth/service.py"
+        assert "max(self.token_expiry_hours, 1)" in change.new_content
+        assert "Create a new authentication token" in change.new_content
+
 
 # ═══════════════════════════════════════════════════════════════
 # 6. RepairService Tests (loop control, fingerprints)

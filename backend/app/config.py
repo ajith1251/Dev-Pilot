@@ -673,9 +673,17 @@ class Settings(BaseSettings):
         if isinstance(v, dict):
             out: Dict[str, List[str]] = {}
             for cap, names in v.items():
-                items = [
-                    str(n).strip().lower() for n in str(names).split(",") if str(n).strip()
-                ]
+                if isinstance(names, (list, tuple)):
+                    # JSON-dict form from .env (pydantic-settings decodes
+                    # complex fields as JSON before validators run).
+                    items = [
+                        str(n).strip().lower() for n in names if str(n).strip()
+                    ]
+                else:
+                    items = [
+                        str(n).strip().lower()
+                        for n in str(names).split(",") if str(n).strip()
+                    ]
                 if str(cap).strip() and items:
                     out[str(cap).strip().lower()] = items
             return out

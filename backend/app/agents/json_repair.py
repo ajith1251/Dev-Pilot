@@ -16,6 +16,67 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def fix_triple_quoted_strings(text: str) -> str:
+    """Convert Python triple-quoted strings (``\"\"\"...\"\"\"`` / ``'''...'''``)
+    that appear as JSON string values into proper JSON string literals.
+
+    Weaker coding/repair models frequently emit ``new_content`` values as
+    Python triple-quoted blocks (raw newlines + inner docstrings) instead of
+    escaped JSON strings — ``json.loads`` then dies inside the value. The
+    heuristic is deliberately narrow:
+
+    - an opening triple-quote must sit in a VALUE position: the previous
+      non-whitespace char is ``:``, ``[``, ``,`` or ``(``;
+    - a closing triple-quote must be followed (after optional whitespace) by
+      ``,``, ``}``, ``]`` or end-of-input — so docstrings INSIDE the content
+      (e.g. a class docstring ``\"\"\"...\"\"\"``) never terminate the outer block.
+      Trade-off: a docstring close immediately followed by ``,`` (rare in
+      Python) would be misread as the outer close; the input is already
+      invalid JSON at that point, so the worst case is a wrong repair, never
+      corruption of valid data.
+
+    Already-valid JSON passes through unchanged (escaped ``\"\"\"`` never
+    matches the scanner, so there is no valid-JSON corruption path).
+    """
+    out: List[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        quote = None
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            quote = text[i:i + 3]
+        if quote is not None:
+            prev = i - 1
+            while prev >= 0 and text[prev] in " \t\n\r":
+                prev -= 1
+            if prev >= 0 and text[prev] in ":[,":
+                # Find the closing triple-quote (followed by , } ] or EOF).
+                close = -1
+                j = i + 3
+                while close == -1:
+                    k = text.find(quote, j)
+                    if k == -1:
+                        break
+                    m = k + 3
+                    while m < n and text[m] in " \t\n\r":
+                        m += 1
+                    if m >= n or text[m] in ",}]":
+                        close = k
+                    else:
+                        j = k + 3
+                if close != -1:
+                    raw = text[i + 3:close]
+                    escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+                    escaped = escaped.replace("\r\n", "\\n")
+                    escaped = escaped.replace("\n", "\\n").replace("\r", "\\n")
+                    escaped = escaped.replace("\t", "\\t")
+                    out.append('"' + escaped + '"')
+                    i = close + 3
+                    continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def fix_single_quotes(text: str) -> str:
     """Convert single-quoted strings to double-quoted, ignoring double-quoted
     regions (so apostrophes inside real JSON strings are never touched).
@@ -165,6 +226,11 @@ def _repair_once(text: str, collapse_braces: bool) -> Optional[str]:
         t = t.replace(src, dst)
 
     t = "".join(ch for ch in t if ch in "\t\n\r" or ord(ch) >= 32)
+
+    # Python triple-quoted string values (``new_content`` code blocks emitted
+    # by weaker models) must be normalized BEFORE single-quote handling and
+    # string masking, otherwise the raw newlines/quotes break both passes.
+    t = fix_triple_quoted_strings(t)
 
     t = fix_single_quotes(t)
     masked, tokens = mask_string_contents(t)
