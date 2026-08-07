@@ -77,6 +77,116 @@ def fix_triple_quoted_strings(text: str) -> str:
     return "".join(out)
 
 
+def _parse_json_string_literal(text: str, i: int) -> Tuple[Optional[str], int]:
+    """Parse a double-quoted JSON string starting at ``text[i]``.
+
+    Returns ``(value, index_after_closing_quote)`` or ``(None, i)`` when the
+    position is not a well-formed string literal (unterminated / bad escape).
+    """
+    if text[i] != '"':
+        return None, i
+    j = i + 1
+    n = len(text)
+    while j < n:
+        c = text[j]
+        if c == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if c == '"':
+            try:
+                value = json.loads(text[i:j + 1])
+            except json.JSONDecodeError:
+                return None, i
+            return value, j + 1
+        j += 1
+    return None, i
+
+
+def _try_join_string_array(text: str, i: int) -> Optional[Tuple[str, int]]:
+    """If ``text[i] == '['`` and the array holds ONLY JSON string elements
+    plus ``#`` comment lines (a weak-model pattern for ``new_content``),
+    return ``("\n".join(values), index_after_closing_bracket)``.
+
+    Requires at least one comment line: legitimate JSON arrays never contain
+    bare ``#`` tokens, so a clean ``["a", "b"]`` is never converted. Arrays
+    containing objects/numbers/bare words are left untouched.
+    """
+    n = len(text)
+    j = i + 1
+    values: List[str] = []
+    saw_comment = False
+    while j < n:
+        while j < n and text[j] in " \t\r\n":
+            j += 1
+        if j >= n:
+            return None
+        c = text[j]
+        if c == "]":
+            if values and saw_comment:
+                return "\n".join(values), j + 1
+            return None
+        if c == ",":
+            j += 1
+            continue
+        if c == "#":
+            saw_comment = True
+            while j < n and text[j] != "\n":
+                j += 1
+            continue
+        if c == '"':
+            value, nj = _parse_json_string_literal(text, j)
+            if value is None:
+                return None
+            values.append(value)
+            j = nj
+            continue
+        # Object / number / bare word element — a legitimate JSON array.
+        return None
+    return None
+
+
+def fix_array_of_lines_content(text: str) -> str:
+    """Convert a JSON array of string lines (with optional ``#`` comment
+    lines) into a single JSON string value.
+
+    Some weaker coding/repair models emit ``new_content`` as an array of
+    code lines — e.g. ``["def f():\n", "# ...\n", "    return 1\n"]`` — which
+    is invalid JSON (bare ``#`` comments) and schema-invalid (the field must
+    be a string). Only arrays whose non-comment elements are ALL JSON strings
+    AND that contain at least one comment line are converted, so legitimate
+    string arrays such as ``{"tags": ["a", "b"]}`` pass through unchanged.
+    """
+    out: List[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            # Copy a whole string literal verbatim so ``[`` inside string
+            # values (e.g. ``"self._tokens[token]"``) is never inspected.
+            j = i + 1
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+        if c == "[":
+            joined = _try_join_string_array(text, i)
+            if joined is not None:
+                value, end = joined
+                out.append(json.dumps(value))
+                i = end
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def fix_single_quotes(text: str) -> str:
     """Convert single-quoted strings to double-quoted, ignoring double-quoted
     regions (so apostrophes inside real JSON strings are never touched).
@@ -233,6 +343,11 @@ def _repair_once(text: str, collapse_braces: bool) -> Optional[str]:
     t = fix_triple_quoted_strings(t)
 
     t = fix_single_quotes(t)
+
+    # Arrays of string lines with `#` comments (weak-model ``new_content``)
+    # must be normalized to a single string BEFORE masking, so the comment
+    # lines never reach the regex passes.
+    t = fix_array_of_lines_content(t)
     masked, tokens = mask_string_contents(t)
 
     if collapse_braces:

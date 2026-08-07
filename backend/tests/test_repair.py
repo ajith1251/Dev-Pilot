@@ -1022,6 +1022,68 @@ class TestFixAgent:
         assert "max(self.token_expiry_hours, 1)" in change.new_content
         assert "Create a new authentication token" in change.new_content
 
+    @pytest.mark.asyncio
+    async def test_execute_recovers_array_of_lines_content_response(self):
+        """Regression pinned to the real nemotron-49b failure: the model emits
+        ``new_content`` as a JSON array of string lines interleaved with ``#``
+        comment lines (invalid JSON + schema-invalid). The array-of-lines
+        normalization must yield a PROPOSED repair with the lines joined into
+        one code string."""
+        from app.agents.fix_agent import FixAgent, FixAgentInput
+
+        mock_provider = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = (
+            "Based on the diagnosis, here is the repair patch:\n\n"
+            "```json\n"
+            '{\n  "status": "proposed",\n'
+            '  "reason": "Added minimum validity floor",\n'
+            '  "expected_effect": "fresh tokens validate",\n'
+            '  "changes": [{\n'
+            '    "operation": "MODIFY",\n'
+            '    "path": "auth/service.py",\n'
+            '    "new_content": [\n'
+            '      # ... (rest of the file remains the same until create_token)\n'
+            '      "def create_token(self, user_id: str) -> str:",\n'
+            '      "    expires_at = datetime.utcnow() + timedelta('
+            'hours=max(self.token_expiry_hours, 1)),  # MINIMAL CHANGE",\n'
+            '      "    return token",\n'
+            '      # ... (rest of the file remains the same)\n'
+            '    ],\n'
+            '    "reason": "Enforced minimum 1-hour validity"\n'
+            "  }]\n"
+            "}\n"
+            "```\n\n### Rationale\n...\n"
+        )
+        mock_provider.chat = AsyncMock(return_value=mock_response)
+
+        agent = FixAgent(llm_provider=mock_provider)
+        diagnosis = FailureDiagnosis(
+            diagnosis_id="diag-001",
+            run_id="run-001",
+            category=FailureCategory.ASSERTION_FAILURE,
+            summary="Test failed",
+            repairability=Repairability.REPAIRABLE,
+        )
+        inp = FixAgentInput(
+            diagnosis=diagnosis,
+            test_result=TestRunResult(
+                run_id="run-001", workspace_id="ws-001",
+                status=ExecutionStatus.FAILED,
+            ),
+            failures=[],
+            attempt_number=1,
+        )
+
+        output = await agent.execute(inp)
+        assert output.proposal.status == RepairProposalStatus.PROPOSED
+        assert output.proposal.patch is not None
+        change = output.proposal.patch.changes[0]
+        assert change.path == "auth/service.py"
+        assert "max(self.token_expiry_hours, 1)" in change.new_content
+        assert "def create_token(self, user_id: str) -> str:" in change.new_content
+        assert "return token" in change.new_content
+
 
 # ═══════════════════════════════════════════════════════════════
 # 6. RepairService Tests (loop control, fingerprints)

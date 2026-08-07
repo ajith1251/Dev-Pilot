@@ -107,7 +107,7 @@ pytest suite fully passed (i.e. the model actually fixed the instant-expiry bug)
 |---|---|---|---|
 | **Planning** | `gemini-3.5-flash-lite` | `opencode_zen deepseek-v4-flash-free` | All available models pass planning; flash-lite is fastest (5s) and cheapest. |
 | **Coding** | `gemini-3.6-flash` | `opencode_zen deepseek-v4-flash-free` / `ollama_cloud gemma4:31b` | Only 5/11 models pass the full bug-fix gate; Gemini has the best latency. Free path: opencode_zen (35s) or ollama gemma4:31b (17s). **Avoid nvidia 8b/49b, cloudflare, openrouter for coding.** |
-| **Repair** | `gemini-3.5-flash-lite` | `opencode_zen deepseek-v4-flash-free` | 8/11 pass after the JSON-repair fix (nvidia 8b unblocked 0% → 100%); flash-lite fastest. nvidia 49b still emits array-style `new_content` (not JSON) — avoid. |
+| **Repair** | `gemini-3.5-flash-lite` | `opencode_zen deepseek-v4-flash-free` | 9/11 pass after the JSON-repair passes (nvidia 8b AND 49b unblocked 0% → 100%); flash-lite fastest. Only unavailable/unpaid models fail (404/401). |
 | **Review** | `gemini-3.5-flash-lite` | `ollama_cloud gemma4:31b` | 8/11 pass; flash-lite fastest. All top-tier models produced correct findings on the buggy file. |
 
 **Overall winner: `gemini-3.5-flash-lite`** — 100% across all five probes at the lowest latency and
@@ -128,13 +128,17 @@ at ~7× the latency.
    `repair_json_text`; (b) `json_repair.py` gained a new base-pass `fix_triple_quoted_strings` for the
    **Python triple-quoted `new_content`** malformation (models emitting `"""..."""` code blocks with raw
    newlines + inner docstrings as JSON values — this was the actual nvidia-8b failure, not doubled
-   braces). Live confirmation on the nvidia repair probe: **`meta/llama-3.1-8b-instruct` went 0% →
-   100%**. `nemotron-49b` still fails (it emits `new_content` as a JSON array of lines with `#`
-   comments — not JSON-shaped, and rejected by the schema even when parseable); it remains a
-   do-not-recommend model (43s avg). 7 new tests: 4 in `test_json_repair.py` (triple-quoted code
-   value with inner docstring, `'''` variant, valid-string untouched, escaped-quote round-trip) +
-   3 in `test_repair.py` (doubled-brace extract, execute-level doubled-brace PROPOSED regression,
-   execute-level triple-quoted-content regression pinned to the real nvidia response shape).
+   braces). A follow-up pass added `fix_array_of_lines_content` for the second nvidia failure mode
+   (`new_content` emitted as a JSON array of string lines interleaved with `#` comment lines —
+   invalid JSON and schema-invalid). Live confirmation on the nvidia repair probe: **
+   `meta/llama-3.1-8b-instruct` went 0% → 100%** and **`nemotron-49b` also went 0% → 100%**
+   (30s avg). Repair is now green on every AVAILABLE model (9/11; only the unavailable
+   `deepseek-r1` 404 and unpaid `deepseek-v4-flash` 401 fail). 12 new tests: 8 in
+   `test_json_repair.py` (triple-quoted code value with inner docstring, `'''` variant, valid-string
+   untouched, escaped-quote round-trip, array-of-lines joined, nemotron trailing-comma shape, legit
+   string arrays untouched, brackets-in-strings untouched) + 4 in `test_repair.py` (doubled-brace
+   extract, execute-level doubled-brace, execute-level triple-quoted, execute-level array-of-lines —
+   each pinned to a real nvidia response shape).
 3. **Model availability hygiene:** `deepseek-ai/deepseek-r1` 404s on the NVIDIA endpoint and
    `opencode_zen deepseek-v4-flash` 401s (no payment method) — both should be dropped from candidate
    lists to avoid wasted failover time.

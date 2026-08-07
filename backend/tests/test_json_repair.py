@@ -151,6 +151,67 @@ class TestRepairJsonText:
         valid = '{"d": "say \\"hi\\""}'
         assert json.loads(fix_triple_quoted_strings(valid)) == {"d": 'say "hi"'}
 
+    def test_array_of_lines_content_joined(self):
+        """Weak-model `new_content` as an array of string lines with `#`
+        comment lines must be normalized to a single joined JSON string."""
+        text = (
+            '{"status": "proposed", "changes": [{"path": "calc.py", '
+            '"new_content": [\n'
+            '  # ... (rest of the file remains the same)\n'
+            '  "def create_token(self, user_id):",\n'
+            '  "    return max(1, 1)",\n'
+            '  # ... (end)\n'
+            ']}]}'
+        )
+        repaired = repair_json_text(text)
+        assert repaired is not None
+        data = json.loads(repaired)
+        nc = data["changes"][0]["new_content"]
+        assert nc == "def create_token(self, user_id):\n    return max(1, 1)"
+
+    def test_array_of_lines_trailing_comma_comment(self):
+        """Exact nemotron-49b shape: trailing comma after the last element
+        before a `#` comment and the closing bracket must survive."""
+        text = (
+            '{"status": "proposed", "changes": [{"operation": "MODIFY", '
+            '"path": "auth/service.py", "new_content": [\n'
+            '  # ... (rest of the file remains the same until create_token)\n'
+            '  "def create_token(self, user_id: str) -> str:",\n'
+            '  "    expires_at = datetime.utcnow() + timedelta(hours='
+            'max(self.token_expiry_hours, 1)),  # MINIMAL CHANGE",\n'
+            '  "    return token",\n'
+            '  # ... (rest of the file remains the same)\n'
+            '], "reason": "floor fix"}]}'
+        )
+        repaired = repair_json_text(text)
+        assert repaired is not None
+        data = json.loads(repaired)
+        nc = data["changes"][0]["new_content"]
+        assert "max(self.token_expiry_hours, 1)" in nc
+        assert "return token" in nc
+        assert len(nc.split("\n")) == 3
+
+    def test_legit_string_array_untouched(self):
+        """A clean JSON array of strings (no comment lines) must never be
+        converted to a string — the transform requires `#` comments."""
+        text = '{"tags": ["a", "b"], "steps": ["s1", "s2"]}'
+        assert json.loads(repair_json_text(text)) == {
+            "tags": ["a", "b"], "steps": ["s1", "s2"],
+        }
+
+    def test_array_with_non_string_elements_untouched(self):
+        text = '{"a": [1, 2], "b": [{"x": 1}], "c": [true, null]}'
+        assert json.loads(repair_json_text(text)) == {
+            "a": [1, 2], "b": [{"x": 1}], "c": [True, None],
+        }
+
+    def test_strings_containing_brackets_untouched(self):
+        """`[` and `]` inside string values must never be treated as arrays."""
+        text = '{"a": "x[1] y", "b": "[\\"z\\"]"}'
+        assert json.loads(repair_json_text(text)) == {
+            "a": "x[1] y", "b": '["z"]',
+        }
+
 
 class TestExtractJsonObject:
     def test_balanced_object(self):
