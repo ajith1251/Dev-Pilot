@@ -2064,6 +2064,12 @@ class OrchestrationService:
         # consensus → memory) — non-fatal, evidence-only.
         await self._ingest_into_graph(run, reasoning_outcome=outcome)
 
+        # Phase 21: capture the Replay Manifest (deterministic snapshot of
+        # stage inputs/outputs, decisions, handoffs, reasoning) so the run
+        # can be replayed / audited without ever calling an LLM again.
+        # Non-fatal: a capture failure never affects the run result.
+        await self._capture_replay_manifest(run)
+
         if run.status == RunStatus.RUNNING:
             if run.failure:
                 run.status = RunStatus.FAILED
@@ -2136,6 +2142,38 @@ class OrchestrationService:
                 message=message,
             ),
         )
+
+    # ── Phase 21: Replay Manifest capture ────────────────────────
+
+    async def _capture_replay_manifest(self, run: DevPilotRun) -> None:
+        """Build + persist the run's Replay Manifest. Never fatal.
+
+        The manifest records deterministic evidence (stage outputs as
+        content hashes, gate/validation/test decisions, handoff claims,
+        consensus/contradictions, repository state fingerprint) so the run
+        can be reproduced and audited without re-invoking any LLM.
+        """
+        try:
+            from app.services.replay_service import ReplayService
+
+            svc = ReplayService()
+            manifest = await svc.capture(run)
+            if manifest.source_run_status != "capture_failed":
+                self._add_event(
+                    run,
+                    EventType.REPLAY_MANIFEST_CAPTURED,
+                    f"Replay manifest {manifest.manifest_id} captured "
+                    f"({len(manifest.stages)} stages, "
+                    f"{len(manifest.deterministic_decisions)} decisions)",
+                    metadata={
+                        "manifest_id": manifest.manifest_id,
+                        "stages": len(manifest.stages),
+                        "decisions": len(manifest.deterministic_decisions),
+                    },
+                )
+                await self._store.update(run)
+        except Exception as exc:
+            logger.debug("Replay manifest capture skipped (non-fatal): %s", exc)
 
     # ── Cancellation ────────────────────────────────────────────
 

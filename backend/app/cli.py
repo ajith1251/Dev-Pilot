@@ -199,6 +199,10 @@ def main() -> None:
     from app.cli_operations import add_cli_commands as add_operations_commands
     add_operations_commands(subparsers)
 
+    # ── Phase 21: Run Replay & Deterministic Reproduction Commands ────
+    from app.cli_replay import add_cli_commands as add_replay_commands
+    add_replay_commands(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "analyze":
@@ -368,6 +372,21 @@ def main() -> None:
     elif args.command == "ops-metrics":
         from app.cli_operations import run_ops_metrics
         run_ops_metrics(args.json)
+    elif args.command == "replay-manifest":
+        from app.cli_replay import run_replay_manifest
+        asyncio.run(run_replay_manifest(args.run_id, args.json))
+    elif args.command == "replay":
+        from app.cli_replay import run_replay
+        sys.exit(asyncio.run(run_replay(args.run_id, args.mode, args.workspace, args.json)))
+    elif args.command == "replay-compare":
+        from app.cli_replay import run_replay_compare
+        sys.exit(asyncio.run(run_replay_compare(args.run_id, args.other_run_id, args.json)))
+    elif args.command == "replay-audit":
+        from app.cli_replay import run_replay_audit
+        asyncio.run(run_replay_audit(args.run_id, args.json))
+    elif args.command == "replays":
+        from app.cli_replay import run_replays
+        asyncio.run(run_replays(args.run_id, args.json))
     else:
         parser.print_help()
 

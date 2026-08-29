@@ -667,6 +667,52 @@ accurate health endpoints, graceful shutdown + restart recovery). Tests:
 
 ---
 
+## Run Replay & Audit (Phase 21)
+
+Run Replay & Deterministic Reproduction turns any completed run into an
+auditable, reproducible record. **LLMs PROPOSE, deterministic systems DECIDE;
+replay re-executes only the deterministic part and never calls an LLM.**
+
+### Backend
+
+- `app/models/replay.py` — `ReplayManifest` (repository state, run config,
+  stage sequence + per-stage classification, deterministic decisions,
+  handoffs, reasoning/consensus, graph/memory versions), `ReplayResult` with
+  checks + stage comparisons, verdicts (MATCH/DRIFT/INVALID/INCOMPLETE) and
+  modes (EXACT/DETERMINISTIC/COMPARE).
+- `app/services/replay_service.py` — manifest build/capture (bounded snapshots
+  + content hashes), EXACT (offline re-execution), DETERMINISTIC (+ live
+  workspace fingerprint/application/testing), COMPARE (two-run), `audit()`
+  no-LLM report. Persistence mirrors the collaboration/reasoning pattern:
+  in-memory authoritative + optional PostgreSQL (`replay_manifests` /
+  `replay_runs`, migration 015) with graceful fallback.
+- `app/api/v1/replay.py` — `GET /runs/{id}/replay/manifest`,
+  `POST /runs/{id}/replay`, `GET /runs/{id}/replay/compare/{other}`,
+  `GET /runs/{id}/replay/audit`, `GET /runs/{id}/replay` (history, paginated).
+- `app/cli_replay.py` — `replay-manifest`, `replay`, `replay-compare`,
+  `replay-audit`, `replays`; CI exit codes (0 match, 1 drift/incomplete,
+  2 invalid).
+- Capture hook: `OrchestrationService._finalize` captures the manifest
+  non-fatally at run completion and emits `REPLAY_MANIFEST_CAPTURED`.
+
+### Frontend (`frontend/src/components/replay/`)
+
+Run-detail `ReplaySection` (manifest status, verdict banner, EXACT /
+DETERMINISTIC / COMPARE start with phase machine + error/retry), `ReplayTimeline`
+(stage comparison + deterministic/LLM-proposed/observational classification),
+`DifferenceViewer` (bounded categorized differences with deterministic
+evidence), `AuditReport` (enterprise summary + expandable checks), `ReplayHistory`
+(paginated). Pure logic lives in `frontend/src/lib/replay/replayModel.ts`
+(verdict tones, difference categorization, state machine — vitest covered).
+Replay execution is synchronous, so no new WebSocket system: the run's existing
+WS pushes a terminal status and the section refreshes to pick up the captured
+manifest; the existing polling fallback covers disconnected mode.
+
+Design: `docs/RUN_AUDIT_AND_REPLAY.md`. Report:
+`workflow-status/REPLAY_DASHBOARD_COMPLETION_REPORT.md`.
+
+---
+
 ## Future Phases
 
 | Phase | Focus | Status |
@@ -694,5 +740,6 @@ accurate health endpoints, graceful shutdown + restart recovery). Tests:
 | 19B | Multi-Provider Failover & Reliability Platform | ✅ Complete |
 | 19C | Cross-repo namespaces + interactive EKG viz + multi-repo acquisition + org-scope queries | ✅ Complete |
 | 20 | Cross-Repository Autonomous Engineering & Production Readiness (A1–A6: multi-repo runs, per-repo scope + EKG ingestion, repository dashboard; B1–B3: provider routing resilience; D: org-graph UI parity; E: unittest/Vitest/Jest parsers; **20B: production reliability & operational hardening** — provider probes/recovery/cooldown/selection, health endpoints, operations dashboard, startup validation, correlation IDs, resource cleanup) | ✅ Complete (see `workflow-status/PHASE20_ROADMAP.md` + `PHASE20A6_COMPLETION_REPORT.md` + `PHASE20B_COMPLETION_REPORT.md`) |
+| 21 | Run Replay & Deterministic Reproduction + Enterprise Audit Dashboard (replay subsystem: manifest capture, EXACT/DETERMINISTIC/COMPARE, audit; dashboard: run-detail Replay & Audit section, timeline, difference viewer, audit report, replay history; CLI CI exit codes) | ✅ Complete (see `docs/RUN_AUDIT_AND_REPLAY.md` + `workflow-status/REPLAY_DASHBOARD_COMPLETION_REPORT.md`) |
 
 

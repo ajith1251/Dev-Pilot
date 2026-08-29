@@ -290,3 +290,8 @@ app.include_router(providers_router)
 from app.api.v1.operations import router as operations_router
 
 app.include_router(operations_router)
+
+# Phase 21: Run Replay & Deterministic Reproduction
+from app.api.v1.replay import router as replay_router
+
+app.include_router(replay_router)

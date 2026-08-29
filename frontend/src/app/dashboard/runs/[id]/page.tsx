@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { runsApi } from "@/lib/api/client";
 import { useRunWebSocket } from "@/lib/hooks/useRunWebSocket";
+import ReplaySection from "@/components/replay/ReplaySection";
 import RepositoryStatusCards from "@/components/runs/RepositoryStatusCards";
 import RepositoryTimeline from "@/components/runs/RepositoryTimeline";
 import OrganizationSummary from "@/components/runs/OrganizationSummary";
@@ -961,6 +962,13 @@ export default function RunDetailPage() {
       <RunHistoryPanel
         runId={run.run_id}
         decisions={run.organization_summary?.engineering_decisions}
+      />
+
+      {/* Phase 21: Replay & Audit */}
+      <ReplaySection
+        runId={run.run_id}
+        sourceRunStatus={run.status}
+        liveRunStatus={run.status}
       />
     </div>
   );

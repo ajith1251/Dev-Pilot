@@ -1,0 +1,153 @@
+{
+  "generated_at": "2026-08-08T20:38:49.563168+00:00",
+  "python": "3.13.14",
+  "corpus_dir": "C:\\Users\\ajith\\AppData\\Local\\Temp\\devpilot-scalability-corpus",
+  "phases": {
+    "1_corpus": [
+      {
+        "owner_repo": "django/django",
+        "path": "C:\\Users\\ajith\\AppData\\Local\\Temp\\devpilot-scalability-corpus\\django",
+        "cloned": "cached",
+        "loc": {
+          "files": 3392,
+          "lines": 542346,
+          "languages": [
+            {
+              "ext": ".py",
+              "files": 2927,
+              "lines": 524942
+            },
+            {
+              "ext": ".js",
+              "files": 45,
+              "lines": 5946
+            },
+            {
+              "ext": ".css",
+              "files": 45,
+              "lines": 5687
+            },
+            {
+              "ext": ".html",
+              "files": 373,
+              "lines": 5641
+            },
+            {
+              "ext": ".sh",
+              "files": 2,
+              "lines": 130
+            }
+          ]
+        }
+      },
+      {
+        "owner_repo": "facebook/react",
+        "path": "C:\\Users\\ajith\\AppData\\Local\\Temp\\devpilot-scalability-corpus\\react",
+        "cloned": "cached",
+        "loc": {
+          "files": 4729,
+          "lines": 823882,
+          "languages": [
+            {
+              "ext": ".js",
+              "files": 3856,
+              "lines": 651891
+            },
+            {
+              "ext": ".ts",
+              "files": 419,
+              "lines": 81509
+            },
+            {
+              "ext": ".rs",
+              "files": 120,
+              "lines": 76448
+            },
+            {
+              "ext": ".css",
+              "files": 108,
+              "lines": 5280
+            },
+            {
+              "ext": ".tsx",
+              "files": 122,
+              "lines": 4484
+            },
+            {
+              "ext": ".html",
+              "files": 79,
+              "lines": 3727
+            }
+          ]
+        }
+      },
+      {
+        "owner_repo": "redis/redis",
+        "path": "C:\\Users\\ajith\\AppData\\Local\\Temp\\devpilot-scalability-corpus\\redis",
+        "cloned": "cached",
+        "loc": {
+          "files": 940,
+          "lines": 395260,
+          "languages": [
+            {
+              "ext": ".c",
+              "files": 474,
+              "lines": 317832
+            },
+            {
+              "ext": ".h",
+              "files": 312,
+              "lines": 56933
+            },
+            {
+              "ext": ".html",
+              "files": 5,
+              "lines": 9658
+            },
+            {
+              "ext": ".py",
+              "files": 47,
+              "lines": 6169
+            },
+            {
+              "ext": ".sh",
+              "files": 82,
+              "lines": 3190
+            },
+            {
+              "ext": ".rb",
+              "files": 9,
+              "lines": 817
+            }
+          ]
+        }
+      }
+    ],
+    "2_repo_intelligence": {
+      "django/django": {
+        "seconds": 5.928,
+        "status": "completed",
+        "files_scanned": 7005,
+        "dirs_scanned": 3261,
+        "files_ignored": 8,
+        "scan_duration_seconds": 5.851
+      },
+      "facebook/react": {
+        "seconds": 5.397,
+        "status": "completed",
+        "files_scanned": 7200,
+        "dirs_scanned": 639,
+        "files_ignored": 2,
+        "scan_duration_seconds": 5.321
+      },
+      "redis/redis": {
+        "seconds": 1.273,
+        "status": "completed",
+        "files_scanned": 1851,
+        "dirs_scanned": 102,
+        "files_ignored": 3,
+        "scan_duration_seconds": 1.247
+      }
+    }
+  }
+}

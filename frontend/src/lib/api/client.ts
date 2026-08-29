@@ -515,6 +515,135 @@ export interface HealthReadyData {
   checked_at: string;
 }
 
+// ── Replay & Audit (Phase 21 replay subsystem) ────────────────
+
+export type ReplayMode = "exact" | "deterministic" | "compare";
+export type ReplayVerdict = "match" | "drift" | "invalid" | "incomplete";
+export type ReplayStageKind = "deterministic" | "llm_proposed" | "observational";
+export type ReplayCheckStatus = "passed" | "failed" | "skipped" | "not_replayable";
+
+/** Captured repository state at run time (audit evidence). */
+export interface ReplayRepositoryState {
+  path: string;
+  fingerprint: string;
+  git_head?: string | null;
+  file_count: number;
+  changed_files: string[];
+}
+
+/** One stage in the replay manifest. */
+export interface ReplayStageRecord {
+  stage: string;
+  kind: ReplayStageKind;
+  status: string;
+  output_hash: string;
+  decision: Record<string, unknown>;
+  captured: boolean;
+}
+
+/** A recorded deterministic decision that replay can re-derive. */
+export interface ReplayDecisionRecord {
+  decision_type: string;
+  statement: string;
+  made_by: string;
+  value: string;
+  replayable: boolean;
+  matched: boolean | null;
+}
+
+/** Durable snapshot of a run for replay and audit. */
+export interface ReplayManifest {
+  exists: boolean;
+  manifest_id?: string;
+  run_id?: string;
+  source_run_status?: string;
+  created_at?: string;
+  repository_state?: ReplayRepositoryState;
+  stage_count?: number;
+  stages?: ReplayStageRecord[];
+  deterministic_decisions?: ReplayDecisionRecord[];
+  handoffs?: Array<Record<string, unknown>>;
+  reasoning?: Record<string, unknown>;
+  graph_memory_versions?: Record<string, unknown>;
+  content_hash?: string;
+  version?: number;
+}
+
+/** One deterministic re-execution check inside a replay. */
+export interface ReplayCheck {
+  stage: string;
+  check: string;
+  status: ReplayCheckStatus;
+  expected: string;
+  actual: string;
+  note: string;
+}
+
+/** Per-stage result of a COMPARE-mode replay. */
+export interface ReplayStageComparison {
+  stage: string;
+  kind: string;
+  recorded_hash: string;
+  replay_hash: string;
+  matched: boolean | null;
+  detail: string;
+}
+
+/** Outcome of one replay execution (summary + bounded detail). */
+export interface ReplayResult {
+  replay_id: string;
+  run_id: string;
+  mode: ReplayMode;
+  verdict: ReplayVerdict;
+  checks_total: number;
+  checks_passed: number;
+  checks_failed: number;
+  checks_skipped: number;
+  checks_not_replayable: number;
+  stages_matched: number;
+  stages_diverged: number;
+  divergences: string[];
+  summary: string;
+  created_at: string;
+  checks?: ReplayCheck[];
+  stage_comparisons?: ReplayStageComparison[];
+}
+
+/** Full no-LLM audit report for a run. */
+export interface ReplayAudit {
+  run_id: string;
+  available: boolean;
+  error?: string;
+  manifest?: Record<string, unknown>;
+  stages?: ReplayStageRecord[];
+  deterministic_decisions?: ReplayDecisionRecord[];
+  handoffs?: unknown[];
+  reasoning?: Record<string, unknown>;
+  graph_memory_versions?: Record<string, unknown>;
+  replay?: Record<string, unknown>;
+  checks?: ReplayCheck[];
+  divergences?: string[];
+  verdict?: string;
+}
+
+/** One entry in a run's replay history. */
+export interface ReplayHistoryEntry {
+  replay_id: string;
+  run_id: string;
+  mode: ReplayMode;
+  verdict: ReplayVerdict;
+  checks_total: number;
+  checks_passed: number;
+  checks_failed: number;
+  checks_skipped: number;
+  checks_not_replayable: number;
+  stages_matched: number;
+  stages_diverged: number;
+  divergences: string[];
+  summary: string;
+  created_at: string;
+}
+
 // ── Generic API helpers ───────────────────────────────────────
 
 class ApiError extends Error {
@@ -746,6 +875,59 @@ export const orgApi = {
   /** Organization-wide graph statistics. */
   async stats(): Promise<{ success: boolean; data: Record<string, unknown> }> {
     return request("/api/v1/graph/org/stats");
+  },
+};
+
+// ── Replay API (Phase 21) ──────────────────────────────────────
+
+export const replayApi = {
+  /** Build (or fetch) the replay manifest for a run. No LLM involved. */
+  async manifest(runId: string): Promise<{ success: boolean; data: ReplayManifest }> {
+    return request(`/api/v1/runs/${encodeURIComponent(runId)}/replay/manifest`);
+  },
+
+  /** Execute a replay. The POST returns the completed result synchronously. */
+  async execute(
+    runId: string,
+    params: { mode: ReplayMode; workspace?: string; otherRunId?: string }
+  ): Promise<{ success: boolean; data: ReplayResult }> {
+    return request(`/api/v1/runs/${encodeURIComponent(runId)}/replay`, {
+      method: "POST",
+      body: JSON.stringify({
+        mode: params.mode,
+        ...(params.workspace ? { workspace: params.workspace } : {}),
+        ...(params.otherRunId ? { other_run_id: params.otherRunId } : {}),
+      }),
+    });
+  },
+
+  /** Compare this run against another run stage by stage. */
+  async compare(
+    runId: string,
+    otherRunId: string
+  ): Promise<{ success: boolean; data: ReplayResult }> {
+    return request(
+      `/api/v1/runs/${encodeURIComponent(runId)}/replay/compare/${encodeURIComponent(otherRunId)}`
+    );
+  },
+
+  /** Full no-LLM audit: manifest + EXACT replay + verdict. */
+  async audit(runId: string): Promise<{ success: boolean; data: ReplayAudit }> {
+    return request(`/api/v1/runs/${encodeURIComponent(runId)}/replay/audit`);
+  },
+
+  /** Replay execution history for a run (newest first, paginated). */
+  async history(
+    runId: string,
+    params?: { limit?: number; offset?: number }
+  ): Promise<{ success: boolean; data: ReplayHistoryEntry[] }> {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    const qs = query.toString();
+    return request(
+      `/api/v1/runs/${encodeURIComponent(runId)}/replay${qs ? `?${qs}` : ""}`
+    );
   },
 };
 

@@ -225,6 +225,9 @@ class TestMigrationRoundTrip:
         await conn.execute(text("DROP TABLE IF EXISTS ekg_organizations CASCADE"))
         # Phase 19B provider metrics snapshots (014)
         await conn.execute(text("DROP TABLE IF EXISTS provider_metric_snapshots CASCADE"))
+        # Phase 21 replay tables (015)
+        await conn.execute(text("DROP TABLE IF EXISTS replay_runs CASCADE"))
+        await conn.execute(text("DROP TABLE IF EXISTS replay_manifests CASCADE"))
         # Phase 17 reasoning tables (010)
         await conn.execute(text("DROP TABLE IF EXISTS engineering_notebooks CASCADE"))
         await conn.execute(text("DROP TABLE IF EXISTS contradiction_records CASCADE"))
@@ -294,6 +297,8 @@ class TestMigrationRoundTrip:
             "ekg_organizations", "ekg_repository_namespaces", "ekg_cross_repository_edges",
             # Phase 19B provider metrics snapshots (014)
             "provider_metric_snapshots",
+            # Phase 21 replay tables (015)
+            "replay_manifests", "replay_runs",
             "alembic_version",
         }
         missing = expected - tables_after
@@ -340,6 +345,8 @@ class TestMigrationRoundTrip:
             "ekg_organizations", "ekg_repository_namespaces", "ekg_cross_repository_edges",
             # Phase 19B provider metrics snapshots (014)
             "provider_metric_snapshots",
+            # Phase 21 replay tables (015)
+            "replay_manifests", "replay_runs",
             "alembic_version",
         }
         missing = expected - tables_after_reupgrade

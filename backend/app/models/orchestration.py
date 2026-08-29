@@ -143,6 +143,9 @@ class EventType(str, Enum):
     REPOSITORY_PATCH_VALIDATED = "repository_patch_validated"
     REPOSITORY_PATCH_REJECTED = "repository_patch_rejected"
 
+    # Phase 21 — run replay / deterministic reproduction
+    REPLAY_MANIFEST_CAPTURED = "replay_manifest_captured"
+
 
 class FailureCode(str, Enum):
     """Machine-readable failure codes."""

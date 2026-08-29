@@ -1371,3 +1371,98 @@ class EKCrossRepositoryEdgeModel(Base):
             f"{self.source_repository_id}->{self.target_repository_id} "
             f"[{self.relationship}]>"
         )
+
+
+# ── Phase 21: Run Replay & Deterministic Reproduction Tables ────
+
+
+class ReplayManifestModel(Base):
+    """Persistent Replay Manifest for a completed run.
+
+    Maps to the 'replay_manifests' table created in migration 015.
+    The full manifest payload is stored as JSONB (bounded by the replay
+    model caps); the normalized columns enable list/query/fingerprint.
+    """
+
+    __tablename__ = "replay_manifests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_id: Mapped[str] = mapped_column(
+        String(32), unique=True, nullable=False, index=True,
+        comment="Unique manifest identifier (RPL-XXXXXXXX)",
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True, comment="Owning run"
+    )
+    source_run_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default=""
+    )
+    repository_path: Mapped[str] = mapped_column(
+        String(1024), nullable=False, default=""
+    )
+    repository_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    manifest_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True
+    )
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("manifest_id", name="uq_replay_manifests_manifest_id"),
+        Index("idx_replay_manifests_run_id", "run_id"),
+        Index("idx_replay_manifests_run_created", "run_id", "created_at"),
+        Index("idx_replay_manifests_fingerprint", "repository_fingerprint"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ReplayManifestModel {self.manifest_id} run={self.run_id}>"
+
+
+class ReplayRunModel(Base):
+    """Persistent record of one replay execution.
+
+    Maps to the 'replay_runs' table created in migration 015.
+    Bounded checks JSONB; verdict/mode normalized for querying.
+    """
+
+    __tablename__ = "replay_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    replay_id: Mapped[str] = mapped_column(
+        String(32), unique=True, nullable=False, index=True,
+        comment="Unique replay identifier (REP-XXXXXXXX)",
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True, comment="Replayed run"
+    )
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="exact"
+    )
+    verdict: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="incomplete", index=True
+    )
+    checks: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
+        JSONB, nullable=True
+    )
+    summary: Mapped[str] = mapped_column(
+        String(500), nullable=False, default=""
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("replay_id", name="uq_replay_runs_replay_id"),
+        Index("idx_replay_runs_run_id", "run_id"),
+        Index("idx_replay_runs_run_created", "run_id", "created_at"),
+        Index("idx_replay_runs_verdict", "verdict"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ReplayRunModel {self.replay_id} run={self.run_id} {self.verdict}>"

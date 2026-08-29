@@ -5,7 +5,7 @@
  * `auxiliary_repositories` + `repo_validation` surface.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { operationsApi, orgApi, runsApi } from "./client";
+import { operationsApi, orgApi, replayApi, runsApi } from "./client";
 
 function mockFetch(json: unknown) {
   const fn = vi.fn().mockResolvedValue({
@@ -157,6 +157,98 @@ describe("operationsApi (Phase 20B)", () => {
     const result = await operationsApi.ready();
     expect(fetchMock.mock.calls[0][0]).toBe("/health/ready");
     expect(result.ready).toBe(true);
+  });
+});
+
+describe("replayApi (Phase 21)", () => {
+  it("GETs the replay manifest for a run", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        exists: true,
+        manifest_id: "RPL-ABC123",
+        run_id: "RUN-1",
+        stage_count: 11,
+        content_hash: "deadbeef",
+      },
+    });
+    const result = await replayApi.manifest("RUN-1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/runs/RUN-1/replay/manifest"
+    );
+    expect(result.data.manifest_id).toBe("RPL-ABC123");
+    expect(result.data.stage_count).toBe(11);
+  });
+
+  it("POSTs a replay with mode and optional workspace/other run", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: {
+        replay_id: "REP-1",
+        run_id: "RUN-1",
+        mode: "deterministic",
+        verdict: "match",
+      },
+    });
+    const result = await replayApi.execute("RUN-1", {
+      mode: "deterministic",
+      workspace: "/tmp/repo",
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/runs/RUN-1/replay");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.mode).toBe("deterministic");
+    expect(body.workspace).toBe("/tmp/repo");
+    expect(body.other_run_id).toBeUndefined();
+    expect(result.data.verdict).toBe("match");
+  });
+
+  it("forwards other_run_id for COMPARE mode", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: { replay_id: "REP-2", mode: "compare", verdict: "drift" },
+    });
+    await replayApi.execute("RUN-1", { mode: "compare", otherRunId: "RUN-2" });
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.mode).toBe("compare");
+    expect(body.other_run_id).toBe("RUN-2");
+  });
+
+  it("GETs a COMPARE between two runs", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: { replay_id: "REP-3", mode: "compare", verdict: "match" },
+    });
+    const result = await replayApi.compare("RUN-1", "RUN-2");
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/runs/RUN-1/replay/compare/RUN-2"
+    );
+    expect(result.data.mode).toBe("compare");
+  });
+
+  it("GETs the audit report", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: { run_id: "RUN-1", available: true, verdict: "match" },
+    });
+    const result = await replayApi.audit("RUN-1");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/runs/RUN-1/replay/audit");
+    expect(result.data.verdict).toBe("match");
+  });
+
+  it("GETs replay history with limit/offset pagination", async () => {
+    const fetchMock = mockFetch({
+      success: true,
+      data: [{ replay_id: "REP-1", verdict: "match" }],
+    });
+    const result = await replayApi.history("RUN-1", { limit: 10, offset: 0 });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/runs/RUN-1/replay?limit=10&offset=0"
+    );
+    expect(result.data[0].replay_id).toBe("REP-1");
   });
 });
 
