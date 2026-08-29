@@ -7,7 +7,7 @@ pydantic-settings==2.5.2
 # ── Database (PostgreSQL) ──────────────────────────────────────
 sqlalchemy>=2.0.35
 asyncpg>=0.29.0
-psycopg2-binary>=2.9.9       # Synchronous driver for Alembic migrations
+psycopg2-binary>=2.9.12       # Synchronous driver for Alembic migrations
 
 # ── LLM Providers ───────────────────────────────────────────────
 openai>=1.50.0
